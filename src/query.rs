@@ -1,7 +1,7 @@
 //! Query orchestration - ties together all components
 
 use crate::aggregator::{Aggregator, QueryResult};
-use crate::expressions::evaluate_expressions;
+
 use crate::reader::read_lineitem;
 use arrow::array::Array;
 
@@ -51,11 +51,8 @@ pub fn execute_tpch_q1(data_path: &str) -> Result<Vec<QueryResult>, Box<dyn std:
         let discount = crate::utils::get_f64_column(&batch, "l_discount")?;
         let tax = crate::utils::get_f64_column(&batch, "l_tax")?;
         
-        // Evaluate expressions on ALL rows (slightly wasteful for filtered rows (~2%), 
-        // but cheaper than copying the columns to new buffers)
-        let expressions = evaluate_expressions(&price, &discount, &tax)?;
-        
         // Aggregate into perfect hash array using the mask
+        // Expressions (disc_price, charge) are computed on the fly inside aggregate_batch
         aggregator.aggregate_batch(
             &mask,
             returnflag,
@@ -63,8 +60,7 @@ pub fn execute_tpch_q1(data_path: &str) -> Result<Vec<QueryResult>, Box<dyn std:
             &quantity,
             &price,
             &discount,
-            &expressions.disc_price,
-            &expressions.charge
+            &tax,
         )?;
     }
     

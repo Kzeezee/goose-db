@@ -1,9 +1,7 @@
 //! Utility functions for data processing
 
-use arrow::array::{Array, Decimal128Array, Float64Array, RecordBatch};
+use arrow::array::{Array, Float64Array, RecordBatch};
 use arrow::compute::cast;
-use arrow::datatypes::Float64Type;
-use std::sync::Arc;
 
 /// Optimized helper to get a Decimal128 column by name and convert to Float64 using Arrow cast kernel
 pub fn get_f64_column(batch: &RecordBatch, name: &str) -> Result<Float64Array, Box<dyn std::error::Error>> {

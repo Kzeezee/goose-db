@@ -92,8 +92,10 @@ ORDER BY l_returnflag, l_linestatus;
 |-----------|-------------|
 | **Column Projection** | Read only 7 required columns from Parquet |
 | **Vectorized Filter** | SIMD date comparison via Arrow kernels |
-| **SIMD Expressions** | Vectorized `(1-discount)` and `(1+tax)` calculations |
+| **Kernel Fusion** | On-the-fly evaluation avoiding intermediate buffers |
 | **Perfect Hash Array** | 6 fixed slots for (A/N/R) × (F/O) groups |
+| **Instruction-Level Parallelism** | 4 independent accumulator sets to break dependency chains |
+| **Raw Byte Pointers** | Direct string buffer access bypassing offsets |
 | **Batch Processing** | 8192 rows per batch to amortize overhead |
 | **LTO + codegen-units=1** | Aggressive compiler optimization |
 
