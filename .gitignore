@@ -12,3 +12,10 @@ Cargo.lock
 
 # MSVC Windows debugger data
 *.pdb
+
+# Python
+.venv/
+
+# Data
+data/
+*.duckdb
