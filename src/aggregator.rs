@@ -1,0 +1,244 @@
+//! Perfect hash array aggregation for TPC-H Q1
+//! 
+//! Uses a fixed 6-slot array instead of HashMap since we know the exact
+//! grouping keys: (A/N/R) × (F/O) = 6 possible combinations
+//! (though typically only 4 appear in TPC-H data)
+
+use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
+
+/// Aggregation state for a single group
+#[derive(Debug, Clone, Default)]
+pub struct AggState {
+    pub sum_qty: f64,
+    pub sum_base_price: f64,
+    pub sum_disc_price: f64,
+    pub sum_charge: f64,
+    pub sum_discount: f64,  // For computing avg_disc
+    pub count: u64,
+}
+
+impl AggState {
+    /// Merge another state into this one
+    pub fn merge(&mut self, other: &AggState) {
+        self.sum_qty += other.sum_qty;
+        self.sum_base_price += other.sum_base_price;
+        self.sum_disc_price += other.sum_disc_price;
+        self.sum_charge += other.sum_charge;
+        self.sum_discount += other.sum_discount;
+        self.count += other.count;
+    }
+    
+    /// Check if this group has any data
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+    
+    /// Compute avg_qty
+    pub fn avg_qty(&self) -> f64 {
+        if self.count == 0 { 0.0 } else { self.sum_qty / self.count as f64 }
+    }
+    
+    /// Compute avg_price  
+    pub fn avg_price(&self) -> f64 {
+        if self.count == 0 { 0.0 } else { self.sum_base_price / self.count as f64 }
+    }
+    
+    /// Compute avg_disc
+    pub fn avg_disc(&self) -> f64 {
+        if self.count == 0 { 0.0 } else { self.sum_discount / self.count as f64 }
+    }
+}
+
+/// Perfect hash function for (returnflag, linestatus) -> index
+/// 
+/// Known keys in TPC-H:
+///   - l_returnflag: 'A' (65), 'N' (78), 'R' (82)
+///   - l_linestatus: 'F' (70), 'O' (79)
+/// 
+/// We use: ((flag - 'A') * 2 + (status == 'O')) as index
+/// This gives us indices 0-5 for the 6 possible combinations
+#[inline(always)]
+pub fn hash_key(flag: u8, status: u8) -> usize {
+    // Simple perfect hash:
+    // A=0, N=1, R=2 (based on ordering), F=0, O=1
+    let flag_idx = match flag {
+        b'A' => 0,
+        b'N' => 1,
+        b'R' => 2,
+        _ => 0, // Should not happen in valid TPC-H data
+    };
+    let status_idx = if status == b'O' { 1 } else { 0 };
+    flag_idx * 2 + status_idx
+}
+
+/// Get the (returnflag, linestatus) for a given hash index
+#[inline(always)]
+pub fn unhash_key(idx: usize) -> (u8, u8) {
+    let flag = match idx / 2 {
+        0 => b'A',
+        1 => b'N',
+        2 => b'R',
+        _ => b'?',
+    };
+    let status = if idx % 2 == 1 { b'O' } else { b'F' };
+    (flag, status)
+}
+
+/// The aggregator using a fixed-size array
+pub struct Aggregator {
+    /// 6 slots for all possible (returnflag, linestatus) combinations
+    pub states: [AggState; 6],
+}
+
+impl Default for Aggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Aggregator {
+    pub fn new() -> Self {
+        Self {
+            states: Default::default(),
+        }
+    }
+    
+    /// Aggregate a batch of data with pre-computed expressions
+    pub fn aggregate_batch(
+        &mut self,
+        batch: &RecordBatch,
+        disc_price: &Float64Array,
+        charge: &Float64Array,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Get column arrays
+        let returnflag = get_string_column(batch, "l_returnflag")?;
+        let linestatus = get_string_column(batch, "l_linestatus")?;
+        let quantity = get_f64_column(batch, "l_quantity")?;
+        let price = get_f64_column(batch, "l_extendedprice")?;
+        let discount = get_f64_column(batch, "l_discount")?;
+        
+        let len = batch.num_rows();
+        
+        // Process each row
+        for i in 0..len {
+            // Get the group key
+            let flag = returnflag.value(i).as_bytes()[0];
+            let status = linestatus.value(i).as_bytes()[0];
+            let idx = hash_key(flag, status);
+            
+            // Accumulate values
+            let state = &mut self.states[idx];
+            state.sum_qty += quantity.value(i);
+            state.sum_base_price += price.value(i);
+            state.sum_disc_price += disc_price.value(i);
+            state.sum_charge += charge.value(i);
+            state.sum_discount += discount.value(i);
+            state.count += 1;
+        }
+        
+        Ok(())
+    }
+    
+    /// Get results sorted by (returnflag, linestatus)
+    pub fn get_results(&self) -> Vec<QueryResult> {
+        let mut results: Vec<QueryResult> = self.states
+            .iter()
+            .enumerate()
+            .filter(|(_, state)| !state.is_empty())
+            .map(|(idx, state)| {
+                let (flag, status) = unhash_key(idx);
+                QueryResult {
+                    returnflag: flag,
+                    linestatus: status,
+                    sum_qty: state.sum_qty,
+                    sum_base_price: state.sum_base_price,
+                    sum_disc_price: state.sum_disc_price,
+                    sum_charge: state.sum_charge,
+                    avg_qty: state.avg_qty(),
+                    avg_price: state.avg_price(),
+                    avg_disc: state.avg_disc(),
+                    count: state.count,
+                }
+            })
+            .collect();
+        
+        // Sort by (returnflag, linestatus) as per ORDER BY clause
+        results.sort_by(|a, b| {
+            a.returnflag.cmp(&b.returnflag)
+                .then(a.linestatus.cmp(&b.linestatus))
+        });
+        
+        results
+    }
+}
+
+/// Final query result row
+#[derive(Debug, Clone)]
+pub struct QueryResult {
+    pub returnflag: u8,
+    pub linestatus: u8,
+    pub sum_qty: f64,
+    pub sum_base_price: f64,
+    pub sum_disc_price: f64,
+    pub sum_charge: f64,
+    pub avg_qty: f64,
+    pub avg_price: f64,
+    pub avg_disc: f64,
+    pub count: u64,
+}
+
+/// Helper to get a String column by name
+fn get_string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a StringArray, Box<dyn std::error::Error>> {
+    let idx = batch
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name() == name)
+        .ok_or_else(|| format!("Column {} not found", name))?;
+    
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .ok_or_else(|| format!("Column {} is not String", name).into())
+}
+
+/// Helper to get a Float64 column by name
+fn get_f64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64Array, Box<dyn std::error::Error>> {
+    let idx = batch
+        .schema()
+        .fields()
+        .iter()
+        .position(|f| f.name() == name)
+        .ok_or_else(|| format!("Column {} not found", name))?;
+    
+    batch
+        .column(idx)
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .ok_or_else(|| format!("Column {} is not Float64", name).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    
+    #[test]
+    fn test_hash_key() {
+        // Test all 6 possible combinations
+        assert_eq!(hash_key(b'A', b'F'), 0);
+        assert_eq!(hash_key(b'A', b'O'), 1);
+        assert_eq!(hash_key(b'N', b'F'), 2);
+        assert_eq!(hash_key(b'N', b'O'), 3);
+        assert_eq!(hash_key(b'R', b'F'), 4);
+        assert_eq!(hash_key(b'R', b'O'), 5);
+    }
+    
+    #[test]
+    fn test_unhash_key() {
+        for idx in 0..6 {
+            let (flag, status) = unhash_key(idx);
+            assert_eq!(hash_key(flag, status), idx);
+        }
+    }
+}
