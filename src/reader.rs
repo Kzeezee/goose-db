@@ -26,10 +26,9 @@ pub const FILTER_DATE_DAYS: i32 = 10471;
 /// Returns an iterator over record batches
 pub fn read_lineitem(path: &str) -> Result<LineitemReader, Box<dyn std::error::Error>> {
     let file = File::open(path)?;
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    let mut builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
     
-    // Get the parquet schema to find column indices
-    let parquet_schema = builder.parquet_schema();
+    // Get arrow schema and projection indices FIRST
     let arrow_schema = builder.schema().clone();
     
     // Find indices of required columns
@@ -43,6 +42,47 @@ pub fn read_lineitem(path: &str) -> Result<LineitemReader, Box<dyn std::error::E
                 .expect(&format!("Column {} not found", col_name))
         })
         .collect();
+    
+    // Row Group Skipping: Filter out row groups that don't match our predicate
+    
+    // Get the parquet schema to find column indices - SCOPE 1
+    let shipdate_idx = {
+        let parquet_schema = builder.parquet_schema();
+        parquet_schema
+            .columns()
+            .iter()
+            .position(|c| c.name() == "l_shipdate")
+            .expect("l_shipdate not found in parquet schema")
+    };
+
+    // 2. Iterate over row groups and check statistics - SCOPE 2
+    let row_groups_to_read = {
+        let metadata = builder.metadata();
+        let mut groups = Vec::new();
+
+        for (i, rg) in metadata.row_groups().iter().enumerate() {
+            if let Some(stats) = rg.column(shipdate_idx).statistics() {
+                // valid way for deprecated min_bytes:
+                let min_val = stats.min_bytes();
+                 
+                if min_val.len() == 4 {
+                    let min_days = i32::from_le_bytes(min_val.try_into().unwrap());
+                    
+                    if min_days > FILTER_DATE_DAYS {
+                        continue;
+                    }
+                }
+            }
+            groups.push(i);
+        }
+        groups
+    };
+    
+    // Apply the row group filter - consumes builder
+    builder = builder.with_row_groups(row_groups_to_read);
+
+    // Get schema again from new builder for projection
+    let parquet_schema = builder.parquet_schema();
     
     // Create projection mask
     let projection = ProjectionMask::roots(parquet_schema, projection_indices.clone());
