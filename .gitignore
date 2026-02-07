@@ -19,3 +19,4 @@ Cargo.lock
 # Data
 data/
 *.duckdb
+*.parquet

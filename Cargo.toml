@@ -12,6 +12,7 @@ arrow-schema = "54"
 
 [dev-dependencies]
 criterion = "0.5"
+chrono = "0.4"
 
 [profile.release]
 lto = true

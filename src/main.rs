@@ -2,7 +2,7 @@ use std::time::Instant;
 use goose_db::query::execute_tpch_q1;
 
 /// Configure your data path here
-const DATA_PATH: &str = "data/lineitem.parquet";
+const DATA_PATH: &str = "data/sf1/lineitem.parquet";
 
 /// Number of benchmark runs
 const NUM_RUNS: usize = 10;

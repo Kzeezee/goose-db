@@ -7,25 +7,35 @@
 use arrow::array::{Float64Array, StringArray};
 
 /// Aggregation state for a single group
+/// 
+/// Cache-aligned to 64 bytes (one cache line) for optimal performance.
+/// Fields are ordered by access frequency: hot fields first.
 #[derive(Debug, Clone, Default)]
+#[repr(C, align(64))]
 pub struct AggState {
-    pub sum_qty: f64,
-    pub sum_base_price: f64,
-    pub sum_disc_price: f64,
-    pub sum_charge: f64,
-    pub sum_discount: f64,  // For computing avg_disc
-    pub count: u64,
-}
+    // Hot fields (accessed every iteration in aggregation loop)
+    pub sum_disc_price: f64,    // 8 bytes - computed expression result
+    pub sum_charge: f64,        // 8 bytes - computed expression result
+    pub count: u64,             // 8 bytes - incremented every row
+    
+    // Warm fields (accessed but less critical)
+    pub sum_qty: f64,           // 8 bytes
+    pub sum_base_price: f64,    // 8 bytes
+    pub sum_discount: f64,      // 8 bytes - for computing avg_disc
+    
+    // Padding to ensure 64-byte alignment (one cache line)
+    _padding: [u8; 16],         // 16 bytes padding
+}                               // Total: 64 bytes
 
 impl AggState {
     /// Merge another state into this one
     pub fn merge(&mut self, other: &AggState) {
-        self.sum_qty += other.sum_qty;
-        self.sum_base_price += other.sum_base_price;
         self.sum_disc_price += other.sum_disc_price;
         self.sum_charge += other.sum_charge;
-        self.sum_discount += other.sum_discount;
         self.count += other.count;
+        self.sum_qty += other.sum_qty;
+        self.sum_base_price += other.sum_base_price;
+        self.sum_discount += other.sum_discount;
     }
     
     /// Check if this group has any data
