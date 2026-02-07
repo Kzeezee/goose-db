@@ -4,7 +4,7 @@
 //! grouping keys: (A/N/R) × (F/O) = 6 possible combinations
 //! (though typically only 4 appear in TPC-H data)
 
-use arrow::array::{Array, Float64Array, RecordBatch, StringArray};
+use arrow::array::{Array, Float64Array, RecordBatch, StringArray, Decimal128Array};
 
 /// Aggregation state for a single group
 #[derive(Debug, Clone, Default)]
@@ -203,8 +203,8 @@ fn get_string_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Strin
         .ok_or_else(|| format!("Column {} is not String", name).into())
 }
 
-/// Helper to get a Float64 column by name
-fn get_f64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64Array, Box<dyn std::error::Error>> {
+/// Helper to get a Decimal128 column by name and convert to Float64
+fn get_f64_column(batch: &RecordBatch, name: &str) -> Result<Float64Array, Box<dyn std::error::Error>> {
     let idx = batch
         .schema()
         .fields()
@@ -212,11 +212,24 @@ fn get_f64_column<'a>(batch: &'a RecordBatch, name: &str) -> Result<&'a Float64A
         .position(|f| f.name() == name)
         .ok_or_else(|| format!("Column {} not found", name))?;
     
-    batch
-        .column(idx)
+    let col = batch.column(idx);
+    let arr = col
         .as_any()
-        .downcast_ref::<Float64Array>()
-        .ok_or_else(|| format!("Column {} is not Float64", name).into())
+        .downcast_ref::<Decimal128Array>()
+        .ok_or_else(|| format!("Column {} is not Decimal128", name))?;
+    
+    Ok(decimal_to_f64(arr))
+}
+
+/// Convert Decimal128Array to Float64Array
+/// Handles the scale from DECIMAL(15,2)
+fn decimal_to_f64(arr: &Decimal128Array) -> Float64Array {
+    let scale = 10_f64.powi(arr.scale() as i32);
+    Float64Array::from_iter_values(
+        arr.iter().map(|v| {
+            v.map(|d| d as f64 / scale).unwrap_or(0.0)
+        })
+    )
 }
 
 #[cfg(test)]
