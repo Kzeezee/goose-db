@@ -1,0 +1,23 @@
+[package]
+name = "goose-db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parquet = "54"
+arrow = { version = "54", features = ["chrono-tz"] }
+arrow-select = "54"
+arrow-array = "54"
+arrow-schema = "54"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[[bench]]
+name = "tpch_q1"
+harness = false
