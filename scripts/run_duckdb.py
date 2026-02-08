@@ -11,6 +11,7 @@ def run_tpch_q1(data_path: str, num_runs: int = 10):
     # Connect and configure for single-threaded execution
     con = duckdb.connect()
     con.execute("SET threads = 1")
+    con.execute("SET memory_limit='1GB'")
     
     query = f"""
     SELECT
