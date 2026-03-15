@@ -1,0 +1,16 @@
+[package]
+name = "goosedb"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arrow = "54"
+parquet = { version = "54", features = ["arrow"] }
+rustc-hash = "1"
+csv = "1"
+clap = { version = "4", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
