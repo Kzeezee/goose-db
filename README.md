@@ -1,110 +1,214 @@
-# goose-db
+# goosedb
 
-A high-performance TPC-H Query 1 processor in Rust, designed to compete with DuckDB using vectorized execution and optimized aggregation.
+A single-threaded, specialised query processor for TPC-H Query 19, written in Rust.
 
-## Features
+goosedb exploits domain-specific knowledge about Q19's data access patterns to outperform DuckDB on this query. The core techniques are aggressive predicate pushdown (both scans filtered before the join) and Parquet dictionary encoding preservation (string columns read as compact integer keys instead of multi-byte strings).
 
-- **Single-threaded** — Fair comparison, no parallelism overhead
-- **Vectorized SIMD** — Arrow compute kernels for date filtering and expression evaluation
-- **Perfect Hash Aggregation** — Fixed 6-slot array instead of HashMap (O(1) with no collisions)
-- **Column Projection** — Reads only 7 of 16 columns from Parquet
-- **No Result Caching** — Fresh execution each run
+---
 
-## Project Structure
+## Run goosedb
 
-```
-goose-db/
-├── src/
-│   ├── main.rs          # Entry point with timing statistics
-│   ├── lib.rs           # Module exports
-│   ├── reader.rs        # Parquet reader with column projection
-│   ├── filter.rs        # Vectorized date filter (SIMD)
-│   ├── expressions.rs   # SIMD expression evaluation
-│   ├── aggregator.rs    # Perfect hash array aggregation
-│   └── query.rs         # Query orchestration
-├── benches/
-│   └── tpch_q1.rs       # Criterion benchmark
-├── scripts/
-│   ├── run_duckdb.py    # DuckDB baseline (single-threaded)
-│   └── flamegraph.ps1   # Profiling script
-└── data/                # Place lineitem.parquet here
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+./target/release/goosedb --data data/sf1 --out result.csv --bench --runs 6 --timing
 ```
 
-## Quick Start
-
-### 1. Configure Data Path
-
-Edit `src/main.rs` line 4:
-```rust
-const DATA_PATH: &str = "data/lineitem.parquet";
-```
-
-Or place your `lineitem.parquet` in the `data/` directory.
-
-### 2. Build & Run
-
+**Windows (PowerShell):**
 ```powershell
+$env:RUSTFLAGS="-C target-cpu=native"
 cargo build --release
-cargo run --release
+.\target\release\goosedb.exe --data data\sf1 --out result.csv --bench --runs 6 --timing
 ```
 
-### 3. Run Benchmarks
+Example output:
+```
+Run 1 (warmup): 265.97 ms      ← printed to stderr
+Run 2: 204.34 ms
+...
+Mean (runs 2–6): 214.80 ms
+3083843.0578                    ← printed to stdout (plain number, no label)
 
+Operator breakdown (run 6):
+  part metadata + alloc              :   1.00 ms
+  part scan + table build            :   9.28 ms
+  lineitem file open                 :   0.07 ms
+  lineitem metadata + schema override:   0.37 ms
+  lineitem reader build              :   0.38 ms
+  lineitem scan + probe + aggregate  : 226.01 ms
+```
+
+---
+
+## Run DuckDB baseline
+
+```bash
+duckdb < scripts/duckdb_baseline.sql
+```
+
+**Windows (PowerShell):**
 ```powershell
-cargo bench --bench tpch_q1
+Get-Content scripts/duckdb_baseline.sql | duckdb
 ```
 
-### 4. Compare with DuckDB
+Example output:
+```
+Run Time (s): real 0.281 user 0.265625 sys 0.015625
+```
 
+The script sets `PRAGMA threads=1` and `.timer on` so the printed time is directly comparable to goosedb's mean.
+
+---
+
+## Results (SF=1)
+
+| System | Mean time | Notes |
+|---|---|---|
+| DuckDB (`threads=1`) | ~281 ms | Internal `.timer on`; excludes process startup |
+| goosedb (RowFilter, BATCH_SIZE=8192) | ~340 ms | Prior approach |
+| goosedb (single-pass, BATCH_SIZE=4096) | ~390 ms | After single-pass refactor, arrow/parquet v58 |
+| **goosedb (+ dictionary encoding)** | **~215 ms** | **Current — 1.3× faster than DuckDB** |
+
+The main win is preserving Parquet dictionary encoding on `l_shipinstruct` and `l_shipmode`: instead of decoding 1.5M string values and comparing bytes per row, Arrow reads dictionary indices (i32) and the hot loop does integer comparisons — resolving the actual string only for the 4–7 distinct values in the dictionary.
+
+---
+
+## Machine specs
+
+| Component | Details |
+|---|---|
+| CPU | Intel Core i7-13700H (14 cores / 20 threads) |
+| RAM | 32 GB |
+| OS | Windows 11 Education |
+| Rust | 1.87.0 |
+| DuckDB | v1.4.3 |
+| arrow / parquet crates | v58 |
+| `RUSTFLAGS` | `-C target-cpu=native` |
+
+---
+
+## Prerequisites
+
+```bash
+# Install Rust (stable)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+
+# Install DuckDB CLI (for data generation and baseline comparison)
+# Windows: download from https://duckdb.org/docs/installation/
+# macOS:   brew install duckdb
+# Linux:   download binary from duckdb.org
+```
+
+---
+
+## Generate data
+
+TPC-H Parquet files are not included in the repository. Generate them with DuckDB:
+
+```bash
+duckdb < scripts/generate_data.sql
+```
+
+**Windows (PowerShell):**
 ```powershell
-python scripts/run_duckdb.py data/lineitem.parquet --runs 10
+Get-Content scripts/generate_data.sql | duckdb
 ```
 
-### 5. Profile with Flamegraph
+This creates:
 
-```powershell
-cargo install flamegraph
-.\scripts\flamegraph.ps1
+```
+data/
+  sf0.5/lineitem.parquet  part.parquet
+  sf1/lineitem.parquet    part.parquet
+  sf2/lineitem.parquet    part.parquet
+  sf5/lineitem.parquet    part.parquet
 ```
 
-## The Query
+---
 
-```sql
-SELECT
-    l_returnflag, l_linestatus,
-    sum(l_quantity) AS sum_qty,
-    sum(l_extendedprice) AS sum_base_price,
-    sum(l_extendedprice * (1 - l_discount)) AS sum_disc_price,
-    sum(l_extendedprice * (1 - l_discount) * (1 + l_tax)) AS sum_charge,
-    avg(l_quantity) AS avg_qty,
-    avg(l_extendedprice) AS avg_price,
-    avg(l_discount) AS avg_disc,
-    count(*) AS count_order
-FROM lineitem
-WHERE l_shipdate <= CAST('1998-09-02' AS date)
-GROUP BY l_returnflag, l_linestatus
-ORDER BY l_returnflag, l_linestatus;
+## Correctness check
+
+goosedb reads the same physical Parquet files as DuckDB and keeps all arithmetic in the integer domain (raw `i64` DECIMAL values, `i128` accumulator). The result is bit-for-bit identical to DuckDB's output.
+
+```bash
+./check_correctness.sh result.csv duckdb_result.csv
+# PASS: 3083843.0578
 ```
 
-## Optimization Techniques
+Expected result at SF=1: `3083843.0578`
 
-| Technique | Description |
-|-----------|-------------|
-| **Column Projection** | Read only 7 required columns from Parquet |
-| **Vectorized Filter** | SIMD date comparison via Arrow kernels |
-| **Kernel Fusion** | On-the-fly evaluation avoiding intermediate buffers |
-| **Perfect Hash Array** | 6 fixed slots for (A/N/R) × (F/O) groups |
-| **Instruction-Level Parallelism** | 4 independent accumulator sets to break dependency chains |
-| **Raw Byte Pointers** | Direct string buffer access bypassing offsets |
-| **Batch Processing** | 8192 rows per batch to amortize overhead |
-| **LTO + codegen-units=1** | Aggressive compiler optimization |
+---
 
-## Dependencies
+## Tests
 
-- `arrow` v54 — Arrow arrays and SIMD compute kernels
-- `parquet` v54 — Parquet file reader
-- `criterion` — Benchmarking framework
+```bash
+cargo test
+```
 
-## License
+The integration test (`tests/correctness_sf1.rs`) runs both pipelines end-to-end and asserts the result equals `3083843.0578`.
 
-MIT
+---
+
+## Architecture
+
+goosedb uses a **two-pipeline, batch-vectorised** model.
+
+### Pipeline 1 — Part table build
+
+```
+part.parquet (4 columns) → inline filter (size/brand/container) → encode to u8 → DirectTable
+```
+
+- Single-pass scan: all 4 columns projected, no RowFilter
+- Inline filter in the insert loop eliminates ~70% of part rows: `p_size 1–15` first (cheapest), then brand ∈ {#12,#23,#34}, then container ∈ 12 values
+- Brand and container strings encoded to compact `u8` indices at build time
+- DirectTable: flat `Vec` indexed by `(p_partkey - 1)` — zero hashing, O(1) probe
+
+### Pipeline 2 — Lineitem scan + probe + aggregate
+
+```
+lineitem.parquet (6 columns, single pass, dictionary strings)
+  → fused: dictionary pre-filter → DirectTable probe → 3-way OR post-join filter → i128 accumulation
+```
+
+- Single-pass scan: all 6 needed columns decoded in one Parquet pass — no RowFilter, no double-decode
+- **String columns (`l_shipinstruct`, `l_shipmode`) read as `DictionaryArray<Int32Type>`** via `with_schema()` override. Arrow preserves the Parquet dictionary: 1.5M rows store i32 keys; the string values (4 for shipinstruct, 7 for shipmode) are decoded only once per batch
+- Hot loop pre-filter: resolve target strings to dictionary indices once per batch, then compare i32 keys — eliminates ~75% of rows with integer ops instead of byte comparisons
+- Probe, post-join filter, and aggregation fused into a single loop — no intermediate buffers
+
+### Key data structures
+
+| Structure | Size (SF=1) | Purpose |
+|---|---|---|
+| `DirectTable` | ~3.2 MB | Flat `Vec<HashTableEntry>` indexed by partkey; fits in L3 |
+| `HashTableEntry` | 16 bytes | `{partkey: i64, brand_idx: u8, size: u8, container_idx: u8, _pad: [u8;5]}` |
+| `AggregateState` | 24 bytes | `i128` accumulator + `u64` row count |
+
+---
+
+## Project structure
+
+```
+goosedb/
+├── src/
+│   ├── main.rs              # CLI, benchmark loop
+│   ├── lib.rs               # Library root (for integration tests)
+│   ├── config.rs            # CLI args, BATCH_SIZE const
+│   ├── encoding.rs          # brand/container string → u8 index
+│   ├── timer.rs             # Lap timer for operator profiling
+│   ├── pipeline/
+│   │   ├── pipeline1.rs     # Part scan → DirectTable build
+│   │   └── pipeline2.rs     # Lineitem scan → dictionary pre-filter → probe → aggregate
+│   └── operators/
+│       ├── scan.rs          # Parquet scanners — schema override for dictionary strings
+│       ├── hash_table.rs    # DirectTable + FxHash table (reference)
+│       └── aggregate.rs     # i128 accumulator
+├── tests/
+│   └── correctness_sf1.rs  # Integration test (SF=1 result == 3083843.0578)
+├── scripts/
+│   ├── generate_data.sql    # DuckDB TPC-H data export
+│   └── duckdb_baseline.sql  # DuckDB Q19 timing (threads=1)
+├── run.sh                   # One-command runner
+├── check_correctness.sh     # Exact output comparison
+└── OPTIMISATIONS.md         # Optimisation tracker (what was tried, what worked)
+```

@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:docs.rs)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "WebFetch(domain:github.com)",
+      "Read(//c/Users/tayca/.cargo/registry/cache/**)",
+      "Read(//c/Users/tayca/.cargo/registry/src/**)",
+      "Bash(find:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)"
+    ]
+  }
+}

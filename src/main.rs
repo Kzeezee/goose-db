@@ -1,74 +1,60 @@
+use clap::Parser;
+use goosedb::config::Args;
+use goosedb::pipeline;
+use goosedb::timer::Timer;
+use std::error::Error;
 use std::time::Instant;
-use goose_db::query::execute_tpch_q1;
 
-/// Configure your data path here
-const DATA_PATH: &str = "/home/kez/school/y2s2/cs464-advanceddb/proj/goose-db/data/lineitem.parquet";
+fn execute_query(data_path: &str, mut t: Option<&mut Timer>) -> Result<f64, Box<dyn Error>> {
+    let table = pipeline::pipeline1::build_part_table(data_path, t.as_deref_mut())?;
+    let agg = pipeline::pipeline2::probe_and_aggregate(data_path, &table, t.as_deref_mut())?;
+    Ok(agg.finalise())
+}
 
-/// Number of benchmark runs
-const NUM_RUNS: usize = 10;
+fn main() -> Result<(), Box<dyn Error>> {
+    let args = Args::parse();
 
-fn main() {
-    println!("TPC-H Query 1 Processor");
-    println!("=======================");
-    println!("Data path: {}", DATA_PATH);
-    println!();
+    let mut result = 0.0_f64;
+    let mut timings = Vec::new();
 
-    // Warmup run (not counted)
-    println!("Warmup run...");
-    let _ = execute_tpch_q1(DATA_PATH);
-    println!();
+    let total_runs = if args.bench { args.runs } else { 1 };
 
-    // Benchmark runs
-    let mut times = Vec::with_capacity(NUM_RUNS);
-    
-    for i in 1..=NUM_RUNS {
+    for run in 0..total_runs {
+        // Only collect operator timing on the last run (avoids noise in earlier runs)
+        let is_last = run + 1 == total_runs;
+        let mut t = if args.timing && is_last { Some(Timer::new()) } else { None };
+
         let start = Instant::now();
-        let result = execute_tpch_q1(DATA_PATH).expect("Query execution failed");
-        let elapsed = start.elapsed();
-        times.push(elapsed.as_secs_f64() * 1000.0); // Convert to ms
-        
-        if i == NUM_RUNS {
-            // Print results on last run
-            println!("Query Results:");
-            println!("{:-<100}", "");
-            println!(
-                "{:<12} {:<12} {:>15} {:>18} {:>18} {:>18} {:>12} {:>12} {:>10} {:>12}",
-                "returnflag", "linestatus", "sum_qty", "sum_base_price", 
-                "sum_disc_price", "sum_charge", "avg_qty", "avg_price", 
-                "avg_disc", "count"
-            );
-            println!("{:-<100}", "");
-            
-            for row in &result {
-                println!(
-                    "{:<12} {:<12} {:>15.2} {:>18.2} {:>18.2} {:>18.2} {:>12.2} {:>12.2} {:>10.2} {:>12}",
-                    row.returnflag as char,
-                    row.linestatus as char,
-                    row.sum_qty,
-                    row.sum_base_price,
-                    row.sum_disc_price,
-                    row.sum_charge,
-                    row.avg_qty,
-                    row.avg_price,
-                    row.avg_disc,
-                    row.count
-                );
+        result = execute_query(&args.data, t.as_mut())?;
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+        if args.bench {
+            if run == 0 {
+                eprintln!("Run {} (warmup): {:.2} ms", run + 1, elapsed_ms);
+            } else {
+                eprintln!("Run {}: {:.2} ms", run + 1, elapsed_ms);
+                timings.push(elapsed_ms);
             }
-            println!();
+        }
+
+        if let Some(ref t) = t {
+            eprintln!("Operator breakdown (run {}):", run + 1);
+            t.report();
         }
     }
 
-    // Statistics
-    let mean = times.iter().sum::<f64>() / times.len() as f64;
-    let variance = times.iter().map(|t| (t - mean).powi(2)).sum::<f64>() / times.len() as f64;
-    let stddev = variance.sqrt();
-    let min = times.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if args.bench && !timings.is_empty() {
+        let mean_ms = timings.iter().sum::<f64>() / timings.len() as f64;
+        eprintln!("Mean (runs 2-{}): {:.2} ms", total_runs, mean_ms);
+    }
 
-    println!("Performance ({} runs):", NUM_RUNS);
-    println!("{:-<40}", "");
-    println!("  Mean:   {:.2} ms", mean);
-    println!("  Stddev: {:.2} ms", stddev);
-    println!("  Min:    {:.2} ms", min);
-    println!("  Max:    {:.2} ms", max);
+    // Write CSV output (4 decimal places to match DuckDB DECIMAL(38,4) output)
+    let mut wtr = csv::Writer::from_path(&args.out)?;
+    wtr.write_record(&["revenue"])?;
+    wtr.write_record(&[format!("{:.4}", result)])?;
+    wtr.flush()?;
+
+    println!("{:.4}", result);
+
+    Ok(())
 }
