@@ -2,7 +2,7 @@
 
 A single-threaded, specialised query processor for TPC-H Query 19, written in Rust.
 
-goosedb exploits domain-specific knowledge about Q19's data access patterns to outperform DuckDB on this query. The core technique is aggressive predicate pushdown: both the part and lineitem Parquet scans are filtered *before* the join, dramatically reducing the number of rows that reach the hash probe.
+goosedb exploits domain-specific knowledge about Q19's data access patterns to outperform DuckDB on this query. The core techniques are aggressive predicate pushdown (both scans filtered before the join) and Parquet dictionary encoding preservation (string columns read as compact integer keys instead of multi-byte strings).
 
 ---
 
@@ -22,22 +22,20 @@ cargo build --release
 
 Example output:
 ```
-Run 1 (warmup): ... ms      ← printed to stderr
-Run 2: ... ms
+Run 1 (warmup): 265.97 ms      ← printed to stderr
+Run 2: 204.34 ms
 ...
-Mean (runs 2–6): ... ms
-3083843.0578               ← printed to stdout (plain number, no label)
+Mean (runs 2–6): 214.80 ms
+3083843.0578                    ← printed to stdout (plain number, no label)
 
-[timing breakdown — run 6]
-  lineitem file open        :   <1 ms
-  lineitem metadata parse   :   ~1 ms
-  lineitem reader build     :   ~0 ms
-  part metadata + alloc     :   ~7 ms
-  part scan + table build   :   ~3 ms
-  lineitem scan + probe + agg: TBD ms   (single-pass: all 1.5M rows, no RowFilter)
+Operator breakdown (run 6):
+  part metadata + alloc              :   1.00 ms
+  part scan + table build            :   9.28 ms
+  lineitem file open                 :   0.07 ms
+  lineitem metadata + schema override:   0.37 ms
+  lineitem reader build              :   0.38 ms
+  lineitem scan + probe + aggregate  : 226.01 ms
 ```
-
-> Run `--bench --runs 6 --timing` to see current numbers on your machine.
 
 ---
 
@@ -67,9 +65,10 @@ The script sets `PRAGMA threads=1` and `.timer on` so the printed time is direct
 |---|---|---|
 | DuckDB (`threads=1`) | ~281 ms | Internal `.timer on`; excludes process startup |
 | goosedb (RowFilter, BATCH_SIZE=8192) | ~340 ms | Prior approach |
-| goosedb (single-pass, BATCH_SIZE=4096) | TBD | Current approach — re-run benchmark to fill in |
+| goosedb (single-pass, BATCH_SIZE=4096) | ~390 ms | After single-pass refactor, arrow/parquet v58 |
+| **goosedb (+ dictionary encoding)** | **~215 ms** | **Current — 1.3× faster than DuckDB** |
 
-The dominant cost is Parquet decompression. DuckDB's advantage comes from its SIMD-accelerated C++ Parquet decompressor; the Rust `parquet` crate does not currently exploit AVX-512.
+The main win is preserving Parquet dictionary encoding on `l_shipinstruct` and `l_shipmode`: instead of decoding 1.5M string values and comparing bytes per row, Arrow reads dictionary indices (i32) and the hot loop does integer comparisons — resolving the actual string only for the 4–7 distinct values in the dictionary.
 
 ---
 
@@ -82,6 +81,7 @@ The dominant cost is Parquet decompression. DuckDB's advantage comes from its SI
 | OS | Windows 11 Education |
 | Rust | 1.87.0 |
 | DuckDB | v1.4.3 |
+| arrow / parquet crates | v58 |
 | `RUSTFLAGS` | `-C target-cpu=native` |
 
 ---
@@ -167,12 +167,13 @@ part.parquet (4 columns) → inline filter (size/brand/container) → encode to 
 ### Pipeline 2 — Lineitem scan + probe + aggregate
 
 ```
-lineitem.parquet (6 columns, single pass)
-  → fused: inline pre-filter → DirectTable probe → 3-way OR post-join filter → i128 accumulation
+lineitem.parquet (6 columns, single pass, dictionary strings)
+  → fused: dictionary pre-filter → DirectTable probe → 3-way OR post-join filter → i128 accumulation
 ```
 
-- Single-pass scan: all 6 needed columns (partkey, quantity, shipmode, shipinstruct, price, discount) decoded in one pass — no RowFilter, no double-decode
-- Inline pre-filter in the hot loop: `shipinstruct = 'DELIVER IN PERSON'` first (~75% rejection), then `shipmode IN ('AIR','AIR REG')`, then `quantity ≤ 30`
+- Single-pass scan: all 6 needed columns decoded in one Parquet pass — no RowFilter, no double-decode
+- **String columns (`l_shipinstruct`, `l_shipmode`) read as `DictionaryArray<Int32Type>`** via `with_schema()` override. Arrow preserves the Parquet dictionary: 1.5M rows store i32 keys; the string values (4 for shipinstruct, 7 for shipmode) are decoded only once per batch
+- Hot loop pre-filter: resolve target strings to dictionary indices once per batch, then compare i32 keys — eliminates ~75% of rows with integer ops instead of byte comparisons
 - Probe, post-join filter, and aggregation fused into a single loop — no intermediate buffers
 
 ### Key data structures
@@ -197,9 +198,9 @@ goosedb/
 │   ├── timer.rs             # Lap timer for operator profiling
 │   ├── pipeline/
 │   │   ├── pipeline1.rs     # Part scan → DirectTable build
-│   │   └── pipeline2.rs     # Lineitem scan → probe → aggregate
+│   │   └── pipeline2.rs     # Lineitem scan → dictionary pre-filter → probe → aggregate
 │   └── operators/
-│       ├── scan.rs          # Parquet scanners — single-pass column projection, no RowFilter
+│       ├── scan.rs          # Parquet scanners — schema override for dictionary strings
 │       ├── hash_table.rs    # DirectTable + FxHash table (reference)
 │       └── aggregate.rs     # i128 accumulator
 ├── tests/

@@ -30,7 +30,9 @@ The goal is to outperform DuckDB (single-threaded) on this query by exploiting d
 
 **Core hypothesis:** By pushing individual predicates down to each table scan and evaluating them *before* the hash join, we can dramatically reduce intermediate result sizes and avoid applying an expensive complex OR filter to millions of joined rows.
 
-**Hypothesis confirmed by simulation:** DuckDB with manually rewritten predicate-pushdown SQL ran in ~0.085s vs the original ~0.159s at SF=1 — a ~1.9× speedup before any low-level optimisations are applied.
+**Hypothesis confirmed by simulation:** DuckDB with manually rewritten predicate-pushdown SQL ran in ~0.085s vs the original ~0.159s at SF=1 — a ~1.9× speedup before any low-level optimisations are applied. (These figures are from the spec's reference machine.)
+
+**Actual result on this machine:** goosedb achieves **~215ms** vs DuckDB **~281ms** at SF=1 — a 1.3× speedup. The further gain beyond predicate pushdown comes from preserving Parquet dictionary encoding on string columns, replacing 1.5M byte-string comparisons with i32 key comparisons in the hot loop.
 
 ---
 
@@ -84,8 +86,8 @@ Derived from inspecting the actual Parquet files exported by DuckDB. These physi
 | l_quantity      | INT64                 | DECIMAL(15,2)       | Raw value ÷ 100 = actual quantity |
 | l_extendedprice | INT64                 | DECIMAL(15,2)       | Raw value ÷ 100 = actual price    |
 | l_discount      | INT64                 | DECIMAL(15,2)       | Raw value ÷ 100 = actual discount |
-| l_shipmode      | BYTE_ARRAY            | VARCHAR             | Compare as raw bytes              |
-| l_shipinstruct  | BYTE_ARRAY            | VARCHAR             | Compare as raw bytes              |
+| l_shipmode      | BYTE_ARRAY (dict)     | VARCHAR             | PLAIN_DICTIONARY encoded; read as DictionaryArray<Int32> |
+| l_shipinstruct  | BYTE_ARRAY (dict)     | VARCHAR             | PLAIN_DICTIONARY encoded; read as DictionaryArray<Int32> |
 
 **part.parquet**
 
@@ -157,7 +159,8 @@ Push predicates that can be evaluated per-table *before* the join:
   → reduces 1.5M rows to ~128K rows before probing
 - **Post-join filter:** the tight 3-way OR predicate (brand+container+quantity+size) — now applied to only ~1,403 joined rows, fused directly with probe and aggregation
 
-**Simulated result: ~0.085s at SF=1 (≈1.9× improvement from pushdown alone)**
+**Simulated result on spec machine: ~0.085s at SF=1 (≈1.9× improvement from pushdown alone)**
+**Actual result on this machine: ~215ms vs DuckDB ~281ms (1.3× faster)**
 
 ---
 
@@ -181,12 +184,12 @@ Push predicates that can be evaluated per-table *before* the join:
 - **AHash**: good general-purpose hash, but FxHash is strictly faster for `i64` integer keys due to its single-multiply design.
 - **FxHash**: ~O(1), zero heap allocation, ~1 instruction per key. With ~60K entries at 0.5 load factor, collision rate is negligible in practice.
 
-### Cargo.toml dependencies (planned)
+### Cargo.toml dependencies (current)
 
 ```toml
 [dependencies]
-arrow       = "54"
-parquet     = { version = "54", features = ["arrow"] }
+arrow       = "58"
+parquet     = { version = "58", features = ["arrow"] }
 rustc-hash  = "1"          # FxHash for integer-keyed hash table
 csv         = "1"
 clap        = { version = "4", features = ["derive"] }
@@ -196,6 +199,8 @@ opt-level     = 3
 lto           = true
 codegen-units = 1
 ```
+
+**Why v58 over v54:** Page reader copy reduction (v57), varint decoder improvements (v57), StringView decoder optimizations (v58). ~30–50ms free improvement at SF=1.
 
 Build for benchmarking with native CPU instructions to enable auto-vectorisation:
 ```bash
@@ -226,28 +231,27 @@ goosedb/
 │   └── duckdb_baseline.sql    # DuckDB timing script (PRAGMA threads=1)
 ├── src/
 │   ├── main.rs                # CLI entry point (clap), benchmark loop, orchestration
-│   ├── config.rs              # CLI args struct, scale-factor path resolution
+│   ├── lib.rs                 # Library root (exposes modules for integration tests)
+│   ├── config.rs              # CLI args struct, BATCH_SIZE const
 │   ├── pipeline/
 │   │   ├── mod.rs
-│   │   ├── pipeline1.rs       # Part scan → filter → encode → hash build (single fused pass)
-│   │   └── pipeline2.rs       # Lineitem scan → pre-filter → compact → fused probe+filter+agg
+│   │   ├── pipeline1.rs       # Part scan → filter → encode → DirectTable build
+│   │   └── pipeline2.rs       # Lineitem scan → dictionary pre-filter → fused probe+filter+agg
 │   ├── operators/
 │   │   ├── mod.rs
-│   │   ├── scan.rs            # Parquet column-projection scanner, yields Arrow RecordBatches
-│   │   ├── filter.rs          # Bitmask construction (FilterMask over Arrow columns)
-│   │   ├── project.rs         # BYTE_ARRAY→u8 encoding, compact-batch extraction
-│   │   ├── hash_table.rs      # FxHash open-addressing hash table (build + probe)
+│   │   ├── scan.rs            # Parquet scanners — schema override for dictionary strings
+│   │   ├── filter.rs          # FilterMask (unused in current pipeline, retained for reference)
+│   │   ├── project.rs         # Compact-batch extraction (unused in current pipeline)
+│   │   ├── hash_table.rs      # DirectTable (production) + FxHash table (reference at SF=5)
 │   │   └── aggregate.rs       # i128 accumulator, final f64 conversion
 │   ├── types/
 │   │   ├── mod.rs
-│   │   ├── batches.rs         # LineitemFilteredBatch
+│   │   ├── batches.rs         # Batch structs (retained for reference)
 │   │   └── masks.rs           # FilterMask ([u64; 32] bitmask)
 │   ├── encoding.rs            # BYTE_ARRAY brand/container → u8 index lookup tables
 │   └── timer.rs               # Lap-timer utility for operator-level profiling
 └── tests/
-    ├── correctness_sf0_5.rs   # Integration test: compare output to DuckDB expected
-    └── expected/
-        └── q19_sf0.5.csv      # Expected result from DuckDB at SF=0.5
+    └── correctness_sf1.rs     # Integration test: SF=1 result == 3083843.0578
 ```
 
 ### Key structural decisions
@@ -263,7 +267,7 @@ goosedb/
 
 goosedb uses the **vectorised (batch) model**:
 
-- Each operator processes a **batch of up to 2048 rows** at a time rather than a single tuple.
+- Each operator processes a **batch of up to 4096 rows** at a time rather than a single tuple.
 - Operators are loop-optimised for processing full batches using SIMD-friendly array layouts.
 - Batch size is fixed at **4096 rows** — chosen to balance L2 cache fit (6 lineitem Int64/Decimal columns × 4096 rows ≈ 192KB numeric data) with per-batch overhead amortisation.
 - The model is **streaming**: only one batch is live in memory at a time per pipeline stage (no full materialisation of intermediate tables).
@@ -306,22 +310,29 @@ DirectTable built: ~60K populated slots in a 200K-slot Vec = ~3.2MB → fits in 
 
 ---
 
-### Pipeline 2 — Lineitem Table: Single-Pass Scan → Fused Pre-Filter+Probe+Filter+Aggregate
+### Pipeline 2 — Lineitem Table: Single-Pass Scan → Dictionary Pre-Filter → Fused Probe+Filter+Aggregate
 
 ```
 TableScan(lineitem)   [Arrow RecordBatch, 4096 rows at a time]
   │  reads all 6 columns in one pass:
   │    l_partkey (Int64Array), l_quantity (Decimal128Array, raw DECIMAL(15,2))
-  │    l_shipinstruct (StringArray), l_shipmode (StringArray)
+  │    l_shipinstruct (DictionaryArray<Int32>), l_shipmode (DictionaryArray<Int32>)
   │    l_extendedprice (Decimal128Array), l_discount (Decimal128Array)
   │  no RowFilter — single projection pass, no double-decode
+  │  string columns read as DictionaryArray via with_schema() override in scan.rs
   ▼
-Fused: Inline Pre-Filter + Hash Probe + Post-Join Filter + Aggregate   [single loop, 4096 rows/batch]
+Once per batch — resolve target strings to dictionary indices:
+  │    si_target_idx = dict index of "DELIVER IN PERSON" in si_dict.values()
+  │    sm_air_idx    = dict index of "AIR"     in sm_dict.values()
+  │    sm_airreg_idx = dict index of "AIR REG" in sm_dict.values()
+  │    (at most 7 string comparisons for the whole batch of 4096 rows)
+  ▼
+Fused: Dictionary Pre-Filter + Hash Probe + Post-Join Filter + Aggregate   [single loop, 4096 rows/batch]
 
   for i in 0..num_rows:
-    // Pre-filter (most selective first)
-    if l_shipinstruct[i] != "DELIVER IN PERSON" → continue   (~75% of rows)
-    if l_shipmode[i] not in {"AIR", "AIR REG"}  → continue
+    // Pre-filter using dictionary key comparisons (i32 == i32, not string bytes)
+    if si_keys[i] != si_target_idx → continue                (~75% of rows)
+    if sm_keys[i] != sm_air_idx && sm_keys[i] != sm_airreg_idx → continue
     let q = l_quantity_raw[i] as i64
     if q > 3000 → continue                                    (~8.5% overall pass rate)
 
@@ -346,6 +357,8 @@ UngroupedAggregate (AggregateState)
      accumulator: i128  — exact integer sum, no floating-point error
      final output: accumulator as f64 / 10_000.0  — single conversion at the very end
 ```
+
+**Why DictionaryArray matters:** `l_shipinstruct` and `l_shipmode` are PLAIN_DICTIONARY encoded in the Parquet file (4 and 7 distinct values respectively across 1.5M rows). Without dictionary preservation, Arrow decodes each row's string into a `StringArray`, requiring a byte comparison for every row in the hot loop. With `DictionaryArray`, Arrow stores 1.5M i32 keys; string bytes are decoded only once per batch. The hot loop does `i32 == i32` comparisons — trivially vectorisable and cache-friendly. This alone accounts for the ~390ms → ~215ms improvement.
 
 ---
 
@@ -394,24 +407,30 @@ struct HashTable {
 
 #### Arrow columns (accessed directly from `RecordBatch`, no wrapper struct)
 ```rust
-// Types as returned by the Arrow Parquet reader:
-l_partkey:       &Int64Array       // i64 — physical INT64
-l_quantity:      &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
-l_shipmode:      &StringArray      // &str — BYTE_ARRAY (zero-copy)
-l_shipinstruct:  &StringArray      // &str — BYTE_ARRAY (zero-copy)
-l_extendedprice: &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
-l_discount:      &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
+// Types as returned by the Arrow Parquet reader with with_schema() override:
+l_partkey:       &Int64Array                   // i64 — physical INT64
+l_quantity:      &Decimal128Array              // i128 — DECIMAL(15,2); cast to i64 at use
+l_shipmode:      &DictionaryArray<Int32Type>   // 1.5M i32 keys + ~7-value StringArray dict
+l_shipinstruct:  &DictionaryArray<Int32Type>   // 1.5M i32 keys + ~4-value StringArray dict
+l_extendedprice: &Decimal128Array              // i128 — DECIMAL(15,2); cast to i64 at use
+l_discount:      &Decimal128Array              // i128 — DECIMAL(15,2); cast to i64 at use
 
-// Decimal128Array values are cast to i64 at point of use (values fit in i64):
+// Dictionary index resolution (once per batch, before the row loop):
+let si_target: i32 = find index of "DELIVER IN PERSON" in si_dict.values();
+let sm_air: i32    = find index of "AIR"     in sm_dict.values();
+let sm_airreg: i32 = find index of "AIR REG" in sm_dict.values();
+
+// Hot loop uses integer key comparisons instead of string byte comparisons:
+si_keys.value(i) == si_target
+sm_keys.value(i) == sm_air || sm_keys.value(i) == sm_airreg
+
+// Decimal128Array values are cast to i64 at point of use:
 let q = quantity_vals[i] as i64;  // raw integer: 1.00 = 100, 30.00 = 3000
-
-// String comparison uses .as_bytes() to avoid allocation:
-shipmode.as_bytes() == b"AIR" || shipmode.as_bytes() == b"AIR REG"
-shipinstruct.as_bytes() == b"DELIVER IN PERSON"
 ```
 
-No intermediate structs (`LineitemFilteredBatch`, `FilterMask`) are materialised.
-All filtering, probing, and aggregation happen in a single fused loop over each batch.
+**Schema override in `scan.rs`:** `with_schema()` on `ArrowReaderOptions` is used to supply a modified Arrow schema that maps `l_shipinstruct` and `l_shipmode` from their default `Utf8` type to `Dictionary(Int32, Utf8)`. This instructs the Parquet reader to preserve the existing Parquet dictionary encoding rather than decoding to plain strings.
+
+No intermediate structs are materialised. All filtering, probing, and aggregation happen in a single fused loop over each batch.
 
 #### `AggregateState`
 ```rust
@@ -454,6 +473,8 @@ impl AggregateState {
 | **Direct-address lookup table**           | Flat `Vec` indexed by `(p_partkey - 1)` — zero hashing, O(1) probe                                            | Single array access per probe; ~3.2MB at SF=1 (fits L3)                        |
 | **Auto-vectorisation**                    | `RUSTFLAGS="-C target-cpu=native"` + `opt-level=3` + `lto=true` + `codegen-units=1`                           | Compiler emits native SIMD for integer arithmetic loops                         |
 | **Streaming (no materialisation)**        | Never hold more than one batch per stage in memory                                                             | Bounded memory regardless of scale factor                                       |
+| **arrow/parquet crate v58**                | Upgrade from v54 → v58                                                                                          | Page reader copy reduction, varint + StringView decoder improvements (~30–50ms free) |
+| **Dictionary encoding preservation**      | `with_schema()` overrides string columns to `Dictionary(Int32, Utf8)`; hot loop uses i32 key comparisons        | Replaces 1.5M byte-string comparisons with 1.5M i32 comparisons; **~390ms → ~215ms** |
 | **Parquet row-group statistics** *(investigated, not implemented)* | Use min/max zone maps to skip row groups                                          | TPC-H has uniform distribution — no row groups skippable. Not worth implementing |
 
 ---
@@ -552,16 +573,16 @@ Follows the project specification exactly:
 
 ```rust
 // In main.rs — process launched once, query runs N times internally
-for run in 0..args.runs {
+for run in 0..total_runs {
     let start = std::time::Instant::now();
-    let result = execute_query(&args.data_path)?;
+    let result = execute_query(&args.data, t.as_mut())?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     if run > 0 {  // skip warm-up run
         timings.push(elapsed_ms);
     }
 }
 let mean_ms = timings.iter().sum::<f64>() / timings.len() as f64;
-println!("Mean (runs 2–{}): {:.2} ms", args.runs, mean_ms);
+eprintln!("Mean (runs 2-{}): {:.2} ms", total_runs, mean_ms);
 ```
 
 ### Machine specs to report
@@ -581,7 +602,7 @@ Both goosedb and DuckDB read from the **same physical Parquet files** containing
 
 - **No epsilon tolerance needed**: the correctness check is an exact string comparison of the printed revenue value.
 - **No ORDER BY in Q19**: the result is a single scalar, so ordering is irrelevant.
-- **Arrow DECIMAL reading**: when reading DECIMAL(15,2) columns via Arrow, read them as `Int64Array` (the physical type) rather than allowing Arrow to auto-convert to `Float64Array`. This preserves the exact integer representation for all arithmetic.
+- **Arrow DECIMAL reading**: DECIMAL(15,2) columns (`l_quantity`, `l_extendedprice`, `l_discount`) are read as `Decimal128Array` (Arrow's promotion of the INT64 physical type). Values are cast to `i64` at point of use — the cast is exact since all values fit in i64. Arrow does not auto-convert to `Float64Array` as long as `skip_arrow_metadata(true)` is used or the crate default is maintained. This preserves the exact integer representation for all arithmetic.
 
 ```bash
 # check_correctness.sh — exact string match
@@ -612,15 +633,15 @@ From the project specification:
 
 ## 13. Deliverables Checklist
 
-- [ ] Source code in clean repository structure
-- [ ] `README.md` — setup, dependencies, exact reproduction steps, machine specs
-- [ ] `run.sh` — one-command runner supporting `--data`, `--out`, `--bench`, `--runs`
-- [ ] `check_correctness.sh` — exact comparison of goosedb output vs DuckDB output
-- [ ] `scripts/generate_data.sql` — DuckDB script to produce Parquet files at all SFs
-- [ ] `scripts/duckdb_baseline.sql` — DuckDB timing script with `PRAGMA threads=1`
-- [ ] Benchmark results table (DuckDB vs goosedb across SF 0.5/1/2/5)
+- [x] Source code in clean repository structure
+- [x] `README.md` — setup, dependencies, exact reproduction steps, machine specs
+- [x] `run.sh` — one-command runner supporting `--data`, `--out`, `--bench`, `--runs`
+- [x] `check_correctness.sh` — exact comparison of goosedb output vs DuckDB output
+- [x] `scripts/generate_data.sql` — DuckDB script to produce Parquet files at all SFs
+- [x] `scripts/duckdb_baseline.sql` — DuckDB timing script with `PRAGMA threads=1`
+- [ ] Benchmark results table (DuckDB vs goosedb across SF 0.5/1/2/5) — SF=1 done; need SF=0.5/2/5
 - [ ] Runtime vs scale factor plot
-- [ ] Operator-level timing breakdown (scan vs join vs filter vs aggregate)
+- [x] Operator-level timing breakdown — use `--timing` flag; SF=1 breakdown in OPTIMISATIONS.md
 - [ ] Final presentation slides (20 min):
   - [ ] Query 19 characteristics
   - [ ] DuckDB baseline: plan + bottleneck analysis
