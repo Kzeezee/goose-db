@@ -185,8 +185,8 @@ Push predicates that can be evaluated per-table *before* the join:
 
 ```toml
 [dependencies]
-arrow       = { version = ">=50", features = ["simd"] }
-parquet     = { version = ">=50", features = ["arrow"] }
+arrow       = "54"
+parquet     = { version = "54", features = ["arrow"] }
 rustc-hash  = "1"          # FxHash for integer-keyed hash table
 csv         = "1"
 clap        = { version = "4", features = ["derive"] }
@@ -265,7 +265,7 @@ goosedb uses the **vectorised (batch) model**:
 
 - Each operator processes a **batch of up to 2048 rows** at a time rather than a single tuple.
 - Operators are loop-optimised for processing full batches using SIMD-friendly array layouts.
-- Batch size is fixed at **2048 rows** — chosen to fit comfortably in L1/L2 cache per batch, and to match Arrow's natural page granularity.
+- Batch size is fixed at **4096 rows** — chosen to balance L2 cache fit (6 lineitem Int64/Decimal columns × 4096 rows ≈ 192KB numeric data) with per-batch overhead amortisation.
 - The model is **streaming**: only one batch is live in memory at a time per pipeline stage (no full materialisation of intermediate tables).
 
 This is in contrast to the iterator (Volcano) model where each call returns one tuple — that model incurs millions of function calls on a 1.5M-row lineitem table. The batch model reduces function call overhead by ~2000×.
@@ -274,75 +274,71 @@ This is in contrast to the iterator (Volcano) model where each call returns one 
 
 ## 6. Pipeline Architecture
 
-### Pipeline 1 — Part Table: Scan → Filter → Encode → Hash Build (single fused pass)
+### Pipeline 1 — Part Table: Single-Pass Scan → Inline Filter → Encode → DirectTable Build
 
-Pipeline 1 runs to completion first. Its output (the hash table) is held in heap memory and passed to Pipeline 2.
+Pipeline 1 runs to completion first. Its output (the DirectTable) is held in heap memory and passed to Pipeline 2.
 
 ```
-TableScan(part)   [Arrow RecordBatch, 2048 rows at a time]
-  │  reads columns: p_partkey (INT64), p_brand (BYTE_ARRAY),
-  │                 p_size (INT32), p_container (BYTE_ARRAY)
+TableScan(part)   [Arrow RecordBatch, 4096 rows at a time]
+  │  reads all 4 columns in one pass: p_partkey (INT64), p_brand (BYTE_ARRAY),
+  │                                   p_size (INT32), p_container (BYTE_ARRAY)
+  │  no RowFilter — single projection pass, no double-decode
   ▼
-For each row in batch — single fused loop (no intermediate batch materialised):
+For each row in batch — single fused loop:
   │
-  ├─ Filter (inline):
-  │    p_brand bytes IN {b"Brand#12", b"Brand#23", b"Brand#34"}
-  │    AND p_size BETWEEN 1 AND 15
-  │    AND p_container bytes IN {b"SM CASE", b"SM BOX", ..., b"LG PKG"}  (12 values)
+  ├─ Inline filter (cheapest first):
+  │    p_size BETWEEN 1 AND 15           → eliminates ~70% immediately
+  │    p_brand bytes IN {Brand#12/23/34} → brand_to_idx() returns u8::MAX if no match
+  │    p_container bytes IN {12 values}  → container_to_idx() returns u8::MAX if no match
   │    → ~60K survivors from 200K rows
   │
   ├─ Encode surviving row:
-  │    p_brand_idx     = byte_to_brand_idx(p_brand)         → u8 {0,1,2}
-  │    p_container_idx = byte_to_container_idx(p_container) → u8 {0..11}
-  │    p_size                                               → u8 (values 1–15 post-filter)
+  │    p_brand_idx     = brand_to_idx(p_brand)         → u8 {0,1,2}
+  │    p_container_idx = container_to_idx(p_container) → u8 {0..11}
+  │    p_size                                          → u8 (values 1–15 post-filter)
   │
-  └─ Insert into HashTable keyed on p_partkey (i64):
+  └─ Insert into DirectTable indexed by (p_partkey - 1):
        entry = HashTableEntry { p_partkey, p_brand_idx, p_size, p_container_idx }
-       uses FxHash open-addressing, load factor ≤ 0.5
+       O(1) insert, zero hashing
 
-HashTable built: ~60K entries × 16 bytes = ~960KB → fits in L2/L3 cache
+DirectTable built: ~60K populated slots in a 200K-slot Vec = ~3.2MB → fits in L3 cache
 ```
 
 ---
 
-### Pipeline 2 — Lineitem Table: Scan → Pre-Filter → Compact → Fused Probe+Filter+Aggregate
+### Pipeline 2 — Lineitem Table: Single-Pass Scan → Fused Pre-Filter+Probe+Filter+Aggregate
 
 ```
-TableScan(lineitem)   [Arrow RecordBatch, 2048 rows at a time]
-  │  reads columns: l_partkey (INT64), l_quantity (INT64/DECIMAL),
-  │                 l_shipmode (BYTE_ARRAY), l_shipinstruct (BYTE_ARRAY),
-  │                 l_extendedprice (INT64/DECIMAL), l_discount (INT64/DECIMAL)
+TableScan(lineitem)   [Arrow RecordBatch, 4096 rows at a time]
+  │  reads all 6 columns in one pass:
+  │    l_partkey (Int64Array), l_quantity (Decimal128Array, raw DECIMAL(15,2))
+  │    l_shipinstruct (StringArray), l_shipmode (StringArray)
+  │    l_extendedprice (Decimal128Array), l_discount (Decimal128Array)
+  │  no RowFilter — single projection pass, no double-decode
   ▼
-Pre-Join Filter (FilterMask — [u64; 32] bitmask)
-  │  l_shipmode bytes IN {b"AIR", b"AIR REG"}
-  │  AND l_shipinstruct bytes == b"DELIVER IN PERSON"
-  │  AND l_quantity_raw <= 3000            ← raw INT64: 30.00 × 100
-  │  → ~128K survivors from 1.5M rows (~8.5% pass rate)
-  │  → bitmask tracks survivors without copying data
-  ▼
-Compact Projection (LineitemFilteredBatch)
-  │  extract only surviving rows from bitmask (~285 per batch typically)
-  │  keep: l_partkey (i64), l_quantity_raw (i64),
-  │        l_extendedprice_raw (i64), l_discount_raw (i64)
-  │  l_shipmode and l_shipinstruct dropped — already consumed by pre-filter
-  ▼
-Fused: Hash Probe + Post-Join Filter + Aggregate   [single loop, ~285 iterations/batch]
+Fused: Inline Pre-Filter + Hash Probe + Post-Join Filter + Aggregate   [single loop, 4096 rows/batch]
 
-  for i in 0..filtered_batch.count:
-    if let Some(entry) = hash_table.get(filtered_batch.l_partkey[i]):
-      let q = filtered_batch.l_quantity_raw[i];
+  for i in 0..num_rows:
+    // Pre-filter (most selective first)
+    if l_shipinstruct[i] != "DELIVER IN PERSON" → continue   (~75% of rows)
+    if l_shipmode[i] not in {"AIR", "AIR REG"}  → continue
+    let q = l_quantity_raw[i] as i64
+    if q > 3000 → continue                                    (~8.5% overall pass rate)
+
+    // Probe DirectTable
+    if let Some(entry) = direct_table.get(l_partkey[i]):
       let passes =
         // Group 1: Brand#12, SM containers, qty 1–11, size 1–5
-        (entry.brand_idx == 0 && entry.container_idx < 4
+        (entry.brand_idx == 0 && entry.container_idx <= 3
          && q >= 100 && q <= 1100 && entry.size <= 5)
         // Group 2: Brand#23, MED containers, qty 10–20, size 1–10
-        || (entry.brand_idx == 1 && entry.container_idx >= 4 && entry.container_idx < 8
+        || (entry.brand_idx == 1 && entry.container_idx >= 4 && entry.container_idx <= 7
             && q >= 1000 && q <= 2000 && entry.size <= 10)
         // Group 3: Brand#34, LG containers, qty 20–30, size 1–15
         || (entry.brand_idx == 2 && entry.container_idx >= 8
-            && q >= 2000 && q <= 3000 && entry.size <= 15);
+            && q >= 2000 && q <= 3000 && entry.size <= 15)
       if passes:
-        agg.accumulator += (l_extendedprice_raw[i] * (100 - l_discount_raw[i])) as i128;
+        agg.accumulator += (l_extendedprice_raw[i] as i64 * (100 - l_discount_raw[i] as i64)) as i128
 
   ~121 rows contribute to accumulator at SF=1
 
@@ -361,7 +357,7 @@ All structs are `#[repr(C, align(64))]` (64-byte cache-line aligned) unless note
 
 No intermediate batch struct is materialised. Arrow `RecordBatch` columns are accessed directly. The only output of Pipeline 1 is the hash table.
 
-#### `HashTableEntry`  (`#[repr(C, align(8))]`)
+#### `HashTableEntry`  (`#[repr(C)]`)
 ```rust
 struct HashTableEntry {
     p_partkey:       i64,     // 8 bytes — physical INT64 from Parquet, join key
@@ -373,20 +369,24 @@ struct HashTableEntry {
 // 60K entries × 16 bytes = ~960KB → fits in L2/L3 cache
 ```
 
-#### `HashTable`  (`#[repr(C, align(64))]`)
+#### `DirectTable`  (primary — used in production)
+```rust
+struct DirectTable {
+    slots: Vec<HashTableEntry>,  // indexed by (p_partkey - 1); brand_idx == u8::MAX = empty
+}
+// 200K slots × 16 bytes = ~3.2MB at SF=1 → fits in L3 cache
+// O(1) probe: single array access, zero hashing, zero collision handling
+```
+
+#### `HashTable`  (reference implementation — available but not used at SF=1)
 ```rust
 struct HashTable {
     entries:  Vec<HashTableEntry>, // dense array of valid entries
-    buckets:  Vec<u32>,            // open-addressing bucket indices
-                                   // value = index into entries; u32::MAX = empty slot
-    size:     u32,                 // number of valid entries (~60K at SF=1)
-    capacity: u32,                 // bucket array length (power of 2, 2× size → 0.5 load factor)
+    buckets:  Vec<u32>,            // open-addressing bucket indices (u32::MAX = empty)
+    capacity_mask: u32,            // power-of-2 capacity - 1 (load factor ≤ 0.5)
 }
-// Hash function: FxHasher on i64 p_partkey (rustc-hash crate)
+// FxHash on i64 p_partkey. ~960KB at SF=1. Preferred over DirectTable at SF=5 (~16MB).
 ```
-
-> **Direct-address table alternative (worth benchmarking at SF≤2):**  
-> TPC-H `p_partkey` values are dense integers in `[1, 200_000 × SF]`. A flat `Vec<Option<HashTableEntry>>` indexed directly by partkey eliminates hashing and collision handling entirely. At SF=1 this costs ~3.2MB (200K × 16 bytes) — likely fits in L3. At SF=5 (~16MB) it likely exceeds L3 on most machines, at which point the hash table's smaller footprint wins. Implement the hash table first; swap in the direct-address table and benchmark both.
 
 ---
 
@@ -394,40 +394,24 @@ struct HashTable {
 
 #### Arrow columns (accessed directly from `RecordBatch`, no wrapper struct)
 ```rust
-// Physical types as returned by the Arrow Parquet reader:
-l_partkey:       &Int64Array    // i64 — INT64
-l_quantity:      &Int64Array    // i64 — INT64, DECIMAL(15,2) raw
-l_shipmode:      &StringArray   // &str — BYTE_ARRAY (zero-copy)
-l_shipinstruct:  &StringArray   // &str — BYTE_ARRAY (zero-copy)
-l_extendedprice: &Int64Array    // i64 — INT64, DECIMAL(15,2) raw
-l_discount:      &Int64Array    // i64 — INT64, DECIMAL(15,2) raw
+// Types as returned by the Arrow Parquet reader:
+l_partkey:       &Int64Array       // i64 — physical INT64
+l_quantity:      &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
+l_shipmode:      &StringArray      // &str — BYTE_ARRAY (zero-copy)
+l_shipinstruct:  &StringArray      // &str — BYTE_ARRAY (zero-copy)
+l_extendedprice: &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
+l_discount:      &Decimal128Array  // i128 — Arrow promotes DECIMAL(15,2) from INT64 logical type
+
+// Decimal128Array values are cast to i64 at point of use (values fit in i64):
+let q = quantity_vals[i] as i64;  // raw integer: 1.00 = 100, 30.00 = 3000
 
 // String comparison uses .as_bytes() to avoid allocation:
 shipmode.as_bytes() == b"AIR" || shipmode.as_bytes() == b"AIR REG"
 shipinstruct.as_bytes() == b"DELIVER IN PERSON"
 ```
 
-#### `FilterMask`
-```rust
-struct FilterMask {
-    bitmask:   [u64; 32],  // 2048 bits — bit i set = row i passes filter
-    set_count: u16,        // number of set bits (survivors)
-}
-// Reused for both the part filter (Pipeline 1, if needed) and lineitem pre-filter (Pipeline 2)
-```
-
-#### `LineitemFilteredBatch`
-```rust
-struct LineitemFilteredBatch {
-    l_partkey:           Vec<i64>,  // for hash probe
-    l_quantity_raw:      Vec<i64>,  // raw DECIMAL(15,2) integer, for post-join filter
-    l_extendedprice_raw: Vec<i64>,  // raw DECIMAL(15,2) integer, for revenue
-    l_discount_raw:      Vec<i64>,  // raw DECIMAL(15,2) integer, for revenue
-    count:               u16,       // ~285 typical per 2048-row input batch
-}
-// No original_indices — not needed since probe+filter+agg are fused into one loop.
-// l_shipmode and l_shipinstruct are dropped here — consumed by the pre-filter.
-```
+No intermediate structs (`LineitemFilteredBatch`, `FilterMask`) are materialised.
+All filtering, probing, and aggregation happen in a single fused loop over each batch.
 
 #### `AggregateState`
 ```rust
@@ -453,29 +437,24 @@ impl AggregateState {
 
 | Optimisation        | Description                                                                                                 | Impact                                                               |
 |---------------------|-------------------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|
-| **Filter pushdown** | Push brand/size/container predicates to part scan; push shipmode/shipinstruct/quantity≤30 to lineitem scan  | Reduces join probe from 1.5M→~128K rows; hash build from 200K→~60K  |
+| **Filter pushdown** | Push brand/size/container predicates to part scan; push shipmode/shipinstruct/quantity≤30 to lineitem scan  | Reduces DirectTable entries from 200K→~60K; reduces rows reaching probe from 1.5M→~128K  |
 
 ### Secondary (low-level)
 
-| Optimisation                          | Description                                                                                           | Rationale                                                             |
-|---------------------------------------|-------------------------------------------------------------------------------------------------------|-----------------------------------------------------------------------|
-| **Batch / vectorised model**          | Process 2048 rows per iteration instead of 1                                                          | ~2000× fewer loop iterations vs Volcano model                         |
-| **Fused probe+filter+aggregate**      | Hash probe, post-join filter, and revenue accumulation merged into a single loop                      | Eliminates intermediate buffer write-then-read cycles                 |
-| **Single-pass Pipeline 1**            | Part filter, encoding, and hash insertion fused — no intermediate batch materialised                  | Avoids one full write-then-read of ~60K rows                          |
-| **Column projection**                 | Read only 6 lineitem columns and 4 part columns from Parquet                                          | Reduces decompression work and memory bandwidth                       |
-| **Filter bitmask**                    | Track pre-filter survivors in `[u64; 32]` without copying rows                                        | Zero data movement for rejected rows                                  |
-| **Compact batch extraction**          | Copy only bitmask survivors into `LineitemFilteredBatch` before probing                               | Reduces probe iterations from ~2048 to ~285 per batch                 |
-| **BYTE_ARRAY raw byte comparison**    | Compare strings as `&[u8]` bytes, never allocating `String`                                           | No heap allocation; enables compiler to optimise comparisons          |
-| **String encoding (u8 index)**        | Encode brand (3 values→u8) and container (12 values→u8) once at hash build time                       | Post-join filter works on 1-byte integers — auto-vectorises cleanly   |
-| **Integer arithmetic throughout**     | DECIMAL fields kept as raw `i64`; revenue summed as `i128`; single `f64` conversion at output         | Exact result matching DuckDB; no floating-point rounding possible     |
-| **FxHash open-addressing**            | Power-of-2 capacity, linear probing, load factor ≤0.5, FxHash on `i64` keys                          | Near-O(1) probe, minimal collisions, no pointer chasing               |
-| **Cache-aligned structs**             | Hot structs marked `#[repr(C, align(64))]`                                                            | Avoids cache-line splits; improves hardware prefetcher behaviour       |
-| **Cache-resident hash table**         | ~60K entries × 16 bytes = ~960KB → fits in L2/L3 cache                                               | Near-zero cache miss rate on probe phase                              |
-| **4× loop unrolling**                 | Manual unrolling of inner filter/aggregate loops where beneficial                                     | Reduces loop overhead, enables better instruction-level parallelism   |
-| **Auto-vectorisation**                | `RUSTFLAGS="-C target-cpu=native"` + aligned structs + scalar integer ops                             | Compiler emits SIMD instructions automatically; no manual intrinsics  |
-| **Streaming (no materialisation)**    | Never hold more than one batch per stage in memory                                                    | Bounded memory regardless of scale factor                             |
-| **Direct-address table** *(optional)* | Replace hash table with flat `Vec` indexed by partkey at SF≤2                                        | Zero hash computation; ~3.2MB at SF=1, benchmarking needed at SF=5   |
-| **Parquet row-group statistics** *(optional)* | Use Parquet min/max zone maps to skip row groups that cannot match any predicate          | Further reduces I/O at large scale factors                            |
+| Optimisation                              | Description                                                                                                    | Rationale                                                                       |
+|-------------------------------------------|----------------------------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------|
+| **Batch / vectorised model**              | Process 4096 rows per iteration instead of 1                                                                   | ~4000× fewer loop iterations vs Volcano model                                   |
+| **Single-pass scan — no RowFilter**       | Both pipelines project all needed columns in one pass; filtering done inline by the caller                     | Eliminates RowFilter's double-decode: old approach decoded 1.5M lineitem rows twice (once for predicate, once for main projection) |
+| **Fused pre-filter+probe+filter+aggregate** | All four lineitem operations merged into one loop per batch                                                 | Eliminates intermediate buffer write-then-read cycles                           |
+| **Filter order: most selective first**    | Lineitem: shipinstruct (~75% rejection) → shipmode → quantity. Part: size (~70%) → brand → container           | Minimises work per row via early exit                                           |
+| **Column projection**                     | Read only 6 lineitem columns and 4 part columns from Parquet                                                   | Reduces decompression work and memory bandwidth                                 |
+| **BYTE_ARRAY raw byte comparison**        | Compare strings as `&[u8]` bytes, never allocating `String`                                                    | No heap allocation; enables compiler to optimise comparisons                    |
+| **String encoding (u8 index)**            | Encode brand (3 values→u8) and container (12 values→u8) once at build time                                     | Post-join filter works on 1-byte integers — auto-vectorises cleanly             |
+| **Integer arithmetic throughout**         | DECIMAL fields kept as raw `i64` (cast from Decimal128Array); revenue summed as `i128`; single `f64` at output | Exact result matching DuckDB; no floating-point rounding possible               |
+| **Direct-address lookup table**           | Flat `Vec` indexed by `(p_partkey - 1)` — zero hashing, O(1) probe                                            | Single array access per probe; ~3.2MB at SF=1 (fits L3)                        |
+| **Auto-vectorisation**                    | `RUSTFLAGS="-C target-cpu=native"` + `opt-level=3` + `lto=true` + `codegen-units=1`                           | Compiler emits native SIMD for integer arithmetic loops                         |
+| **Streaming (no materialisation)**        | Never hold more than one batch per stage in memory                                                             | Bounded memory regardless of scale factor                                       |
+| **Parquet row-group statistics** *(investigated, not implemented)* | Use min/max zone maps to skip row groups                                          | TPC-H has uniform distribution — no row groups skippable. Not worth implementing |
 
 ---
 

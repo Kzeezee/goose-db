@@ -6,21 +6,68 @@ goosedb exploits domain-specific knowledge about Q19's data access patterns to o
 
 ---
 
+## Run goosedb
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+./target/release/goosedb --data data/sf1 --out result.csv --bench --runs 6 --timing
+```
+
+**Windows (PowerShell):**
+```powershell
+$env:RUSTFLAGS="-C target-cpu=native"
+cargo build --release
+.\target\release\goosedb.exe --data data\sf1 --out result.csv --bench --runs 6 --timing
+```
+
+Example output:
+```
+Run 1 (warmup): ... ms      ← printed to stderr
+Run 2: ... ms
+...
+Mean (runs 2–6): ... ms
+3083843.0578               ← printed to stdout (plain number, no label)
+
+[timing breakdown — run 6]
+  lineitem file open        :   <1 ms
+  lineitem metadata parse   :   ~1 ms
+  lineitem reader build     :   ~0 ms
+  part metadata + alloc     :   ~7 ms
+  part scan + table build   :   ~3 ms
+  lineitem scan + probe + agg: TBD ms   (single-pass: all 1.5M rows, no RowFilter)
+```
+
+> Run `--bench --runs 6 --timing` to see current numbers on your machine.
+
+---
+
+## Run DuckDB baseline
+
+```bash
+duckdb < scripts/duckdb_baseline.sql
+```
+
+**Windows (PowerShell):**
+```powershell
+Get-Content scripts/duckdb_baseline.sql | duckdb
+```
+
+Example output:
+```
+Run Time (s): real 0.281 user 0.265625 sys 0.015625
+```
+
+The script sets `PRAGMA threads=1` and `.timer on` so the printed time is directly comparable to goosedb's mean.
+
+---
+
 ## Results (SF=1)
 
 | System | Mean time | Notes |
 |---|---|---|
 | DuckDB (`threads=1`) | ~281 ms | Internal `.timer on`; excludes process startup |
-| goosedb | ~358 ms | `--bench --runs 8`; steady-state ~340–360 ms |
-| Ratio | **1.27×** | Gap is Parquet decompression dominated |
-
-Operator breakdown (warm cache, run 6):
-
-| Stage | Time |
-|---|---|
-| part scan + DirectTable build | ~10 ms |
-| lineitem predicate scan (RowFilter `build()`) | ~190 ms |
-| lineitem main scan + probe + aggregate | ~125 ms |
+| goosedb (RowFilter, BATCH_SIZE=8192) | ~340 ms | Prior approach |
+| goosedb (single-pass, BATCH_SIZE=4096) | TBD | Current approach — re-run benchmark to fill in |
 
 The dominant cost is Parquet decompression. DuckDB's advantage comes from its SIMD-accelerated C++ Parquet decompressor; the Rust `parquet` crate does not currently exploit AVX-512.
 
@@ -59,10 +106,11 @@ source $HOME/.cargo/env
 TPC-H Parquet files are not included in the repository. Generate them with DuckDB:
 
 ```bash
-# bash / Linux / macOS
 duckdb < scripts/generate_data.sql
+```
 
-# PowerShell (Windows)
+**Windows (PowerShell):**
+```powershell
 Get-Content scripts/generate_data.sql | duckdb
 ```
 
@@ -78,67 +126,11 @@ data/
 
 ---
 
-## Build
-
-```bash
-# Release build with native CPU optimisations (required for benchmarking)
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-
-# Then run the binary directly (avoids cargo startup overhead in timing)
-./target/release/goosedb --data data/sf1 --out result.csv --bench --runs 6
-```
-
-> **Windows / PowerShell:** `RUSTFLAGS=...` inline syntax does not work in PowerShell. Set the variable on its own line first:
-> ```powershell
-> $env:RUSTFLAGS="-C target-cpu=native"
-> cargo build --release
-> .\target\release\goosedb.exe --data data/sf1 --out result.csv --bench --runs 6
-> ```
-
----
-
-## Run
-
-```bash
-# Single query execution — writes result to result.csv and prints revenue to stdout
-./run.sh --data data/sf1 --out result.csv
-
-# Benchmark mode — 6 runs, run 1 discarded as warmup, mean of runs 2–6 reported
-./run.sh --data data/sf1 --out result.csv --bench --runs 6
-
-# With operator-level timing breakdown (printed on last run only)
-./run.sh --data data/sf1 --out result.csv --bench --runs 6 --timing
-
-# All scale factors
-for sf in 0.5 1 2 5; do
-    ./run.sh --data data/sf${sf} --out results/result_sf${sf}.csv --bench --runs 6
-done
-```
-
-**Output format** — `result.csv`:
-
-```
-revenue
-3083843.0578
-```
-
----
-
 ## Correctness check
 
 goosedb reads the same physical Parquet files as DuckDB and keeps all arithmetic in the integer domain (raw `i64` DECIMAL values, `i128` accumulator). The result is bit-for-bit identical to DuckDB's output.
 
 ```bash
-# Generate DuckDB reference output (single-threaded, same Parquet files)
-# bash
-duckdb < scripts/duckdb_baseline.sql
-
-# PowerShell (Windows)
-Get-Content scripts/duckdb_baseline.sql | duckdb
-
-# Both write duckdb_result.csv and print timing to the terminal
-
-# Exact string comparison
 ./check_correctness.sh result.csv duckdb_result.csv
 # PASS: 3083843.0578
 ```
@@ -150,14 +142,7 @@ Expected result at SF=1: `3083843.0578`
 ## Tests
 
 ```bash
-# Run all unit tests + integration tests
 cargo test
-
-# Integration test only (requires data/sf1/)
-cargo test --test correctness_sf1
-
-# Unit tests only
-cargo test --lib
 ```
 
 The integration test (`tests/correctness_sf1.rs`) runs both pipelines end-to-end and asserts the result equals `3083843.0578`.
@@ -171,26 +156,24 @@ goosedb uses a **two-pipeline, batch-vectorised** model.
 ### Pipeline 1 — Part table build
 
 ```
-part.parquet → RowFilter (brand/size/container) → encode to u8 → DirectTable
+part.parquet (4 columns) → inline filter (size/brand/container) → encode to u8 → DirectTable
 ```
 
-- RowFilter eliminates ~70% of part rows before any data enters the pipeline
-- Brand and container strings are encoded to compact `u8` indices once, at build time
+- Single-pass scan: all 4 columns projected, no RowFilter
+- Inline filter in the insert loop eliminates ~70% of part rows: `p_size 1–15` first (cheapest), then brand ∈ {#12,#23,#34}, then container ∈ 12 values
+- Brand and container strings encoded to compact `u8` indices at build time
 - DirectTable: flat `Vec` indexed by `(p_partkey - 1)` — zero hashing, O(1) probe
 
 ### Pipeline 2 — Lineitem scan + probe + aggregate
 
 ```
-lineitem.parquet → RowFilter predicate scan (build)
-                → main projection (selected rows only)
-                → DirectTable probe
-                → 3-way OR post-join filter
-                → i128 revenue accumulation
+lineitem.parquet (6 columns, single pass)
+  → fused: inline pre-filter → DirectTable probe → 3-way OR post-join filter → i128 accumulation
 ```
 
-- RowFilter eagerly evaluates `shipinstruct = 'DELIVER IN PERSON' AND shipmode IN ('AIR','AIR REG') AND quantity ≤ 30` across all 1.5M rows in `build()`, producing a `RowSelection`
-- The main scan then reads only the 4 projection columns for the ~128K selected rows
-- Probe, post-join filter, and aggregation are fused into a single loop
+- Single-pass scan: all 6 needed columns (partkey, quantity, shipmode, shipinstruct, price, discount) decoded in one pass — no RowFilter, no double-decode
+- Inline pre-filter in the hot loop: `shipinstruct = 'DELIVER IN PERSON'` first (~75% rejection), then `shipmode IN ('AIR','AIR REG')`, then `quantity ≤ 30`
+- Probe, post-join filter, and aggregation fused into a single loop — no intermediate buffers
 
 ### Key data structures
 
@@ -216,7 +199,7 @@ goosedb/
 │   │   ├── pipeline1.rs     # Part scan → DirectTable build
 │   │   └── pipeline2.rs     # Lineitem scan → probe → aggregate
 │   └── operators/
-│       ├── scan.rs          # Parquet scanners with RowFilter pushdown
+│       ├── scan.rs          # Parquet scanners — single-pass column projection, no RowFilter
 │       ├── hash_table.rs    # DirectTable + FxHash table (reference)
 │       └── aggregate.rs     # i128 accumulator
 ├── tests/

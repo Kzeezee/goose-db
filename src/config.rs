@@ -1,7 +1,8 @@
 use clap::Parser;
 
-/// Batch size for vectorised processing. Change to 4096 or 8192 to benchmark larger batches.
-pub const BATCH_SIZE: usize = 8192;
+/// Batch size for vectorised processing. 4096 balances L2 cache fit with batch overhead.
+/// With 6 Int64/String columns at 4096 rows ≈ 192KB numeric data — fits in L2.
+pub const BATCH_SIZE: usize = 4096;
 
 /// Number of u64 words in a FilterMask bitmask.
 pub const MASK_WORDS: usize = BATCH_SIZE / 64;
