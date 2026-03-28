@@ -8,16 +8,19 @@ goosedb exploits domain-specific knowledge about Q19's data access patterns to o
 
 ## Run goosedb
 
+**Bash / WSL:**
 ```bash
-RUSTFLAGS="-C target-cpu=native" cargo build --release
-./target/release/goosedb --data data/sf1 --out result.csv --bench --runs 6 --timing
+./run.sh --data data/sf1 --out result.csv --bench --runs 6 --timing
 ```
 
 **Windows (PowerShell):**
 ```powershell
-$env:RUSTFLAGS="-C target-cpu=native"
-cargo build --release
-.\target\release\goosedb.exe --data data\sf1 --out result.csv --bench --runs 6 --timing
+$env:RUSTFLAGS="-C target-cpu=native"; cargo run --release -- --data data/sf1 --out result.csv --bench --runs 6 --timing
+```
+
+**Windows (Command Prompt):**
+```cmd
+set RUSTFLAGS=-C target-cpu=native && cargo run --release -- --data data/sf1 --out result.csv --bench --runs 6 --timing
 ```
 
 Example output:
@@ -41,48 +44,25 @@ Operator breakdown (run 6):
 
 ## Run DuckDB baseline
 
-```bash
-duckdb < scripts/duckdb_baseline.sql
-```
+Requires the DuckDB CLI installed and on PATH.
 
-**Windows (PowerShell):**
-```powershell
-Get-Content scripts/duckdb_baseline.sql | duckdb
+```bash
+python scripts/duckdb_baseline.py --data data/sf1 --runs 6 --timing
 ```
 
 Example output:
 ```
-Run Time (s): real 0.281 user 0.265625 sys 0.015625
+Run 1 (warmup): 310.42 ms
+Run 2: 281.15 ms
+Run 3: 279.83 ms
+Run 4: 280.47 ms
+Run 5: 282.01 ms
+Run 6: 280.54 ms
+Mean (runs 2-6): 280.80 ms
+3083843.0578
 ```
 
-The script sets `PRAGMA threads=1` and `.timer on` so the printed time is directly comparable to goosedb's mean.
-
----
-
-## Results (SF=1)
-
-| System | Mean time | Notes |
-|---|---|---|
-| DuckDB (`threads=1`) | ~281 ms | Internal `.timer on`; excludes process startup |
-| goosedb (RowFilter, BATCH_SIZE=8192) | ~340 ms | Prior approach |
-| goosedb (single-pass, BATCH_SIZE=4096) | ~390 ms | After single-pass refactor, arrow/parquet v58 |
-| **goosedb (+ dictionary encoding)** | **~215 ms** | **Current — 1.3× faster than DuckDB** |
-
-The main win is preserving Parquet dictionary encoding on `l_shipinstruct` and `l_shipmode`: instead of decoding 1.5M string values and comparing bytes per row, Arrow reads dictionary indices (i32) and the hot loop does integer comparisons — resolving the actual string only for the 4–7 distinct values in the dictionary.
-
----
-
-## Machine specs
-
-| Component | Details |
-|---|---|
-| CPU | Intel Core i7-13700H (14 cores / 20 threads) |
-| RAM | 32 GB |
-| OS | Windows 11 Education |
-| Rust | 1.87.0 |
-| DuckDB | v1.4.3 |
-| arrow / parquet crates | v58 |
-| `RUSTFLAGS` | `-C target-cpu=native` |
+The script runs single-threaded (`PRAGMA threads=1`), discards the first run as warmup, and reports the mean of runs 2–N — directly comparable to goosedb's `--bench` output.
 
 ---
 
