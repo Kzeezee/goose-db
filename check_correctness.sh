@@ -7,8 +7,8 @@ if [ $# -ne 2 ]; then
     exit 1
 fi
 
-goosedb_val=$(tail -1 "$1")
-duckdb_val=$(tail -1 "$2")
+goosedb_val=$(tail -1 "$1" | tr -d '\r')
+duckdb_val=$(tail -1 "$2" | tr -d '\r')
 
 if [ "$goosedb_val" = "$duckdb_val" ]; then
     echo "PASS: $goosedb_val"
