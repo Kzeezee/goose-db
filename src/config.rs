@@ -4,8 +4,6 @@ use clap::Parser;
 /// With 6 Int64/String columns at 4096 rows ≈ 192KB numeric data — fits in L2.
 pub const BATCH_SIZE: usize = 4096;
 
-/// Number of u64 words in a FilterMask bitmask.
-pub const MASK_WORDS: usize = BATCH_SIZE / 64;
 
 #[derive(Parser, Debug)]
 #[command(name = "goosedb", about = "TPC-H Query 19 specialised processor")]

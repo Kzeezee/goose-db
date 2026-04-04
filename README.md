@@ -160,8 +160,8 @@ lineitem.parquet (6 columns, single pass, dictionary strings)
 
 | Structure | Size (SF=1) | Purpose |
 |---|---|---|
-| `DirectTable` | ~3.2 MB | Flat `Vec<HashTableEntry>` indexed by partkey; fits in L3 |
-| `HashTableEntry` | 16 bytes | `{partkey: i64, brand_idx: u8, size: u8, container_idx: u8, _pad: [u8;5]}` |
+| `DirectTable` | ~3.2 MB | Flat `Vec<PartEntry>` indexed by partkey; fits in L3 |
+| `PartEntry` | 16 bytes | `{partkey: i64, brand_idx: u8, size: u8, container_idx: u8, _pad: [u8;5]}` |
 | `AggregateState` | 24 bytes | `i128` accumulator + `u64` row count |
 
 ---
@@ -181,7 +181,7 @@ goosedb/
 │   │   └── pipeline2.rs     # Lineitem scan → dictionary pre-filter → probe → aggregate
 │   └── operators/
 │       ├── scan.rs          # Parquet scanners — schema override for dictionary strings
-│       ├── hash_table.rs    # DirectTable + FxHash table (reference)
+│       ├── hash_table.rs    # PartEntry + DirectTable (direct-address lookup)
 │       └── aggregate.rs     # i128 accumulator
 ├── tests/
 │   └── correctness_sf1.rs  # Integration test (SF=1 result == 3083843.0578)

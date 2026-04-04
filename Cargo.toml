@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 arrow = "58"
 parquet = { version = "58", features = ["arrow"] }
-rustc-hash = "1"
 csv = "1"
 clap = { version = "4", features = ["derive"] }
 

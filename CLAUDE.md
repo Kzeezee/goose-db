@@ -172,27 +172,18 @@ Push predicates that can be evaluated per-table *before* the join:
 | Build system  | **Cargo**               | Standard Rust toolchain                                                   |
 | Parquet I/O   | **parquet** crate       | Official Apache Parquet Rust implementation, column-level projection       |
 | Batch format  | **Apache Arrow**        | In-memory columnar arrays, SIMD-friendly, same layout as Parquet pages    |
-| Hash function | **FxHash** (rustc-hash) | Fastest integer-keyed hash; used inside the Rust compiler itself          |
 | Timing        | **std::time::Instant**  | Nanosecond-precision wall-clock, no extra dependency needed               |
 | Output        | **csv** crate           | Write result.csv matching DuckDB's output format                          |
 | CLI parsing   | **clap**                | Ergonomic argument parsing for `--data`, `--out`, `--bench`, `--runs`    |
-
-### Why FxHash over alternatives
-
-- **Perfect hashing** (compile-time, e.g. `phf`): requires a static key set known at compile time. The filtered part keys change per scale factor and per run — inapplicable here.
-- **Runtime perfect hashing**: finding a collision-free function over ~60K dynamic keys requires non-trivial upfront computation that would negate the probe savings.
-- **AHash**: good general-purpose hash, but FxHash is strictly faster for `i64` integer keys due to its single-multiply design.
-- **FxHash**: ~O(1), zero heap allocation, ~1 instruction per key. With ~60K entries at 0.5 load factor, collision rate is negligible in practice.
 
 ### Cargo.toml dependencies (current)
 
 ```toml
 [dependencies]
-arrow       = "58"
-parquet     = { version = "58", features = ["arrow"] }
-rustc-hash  = "1"          # FxHash for integer-keyed hash table
-csv         = "1"
-clap        = { version = "4", features = ["derive"] }
+arrow   = "58"
+parquet = { version = "58", features = ["arrow"] }
+csv     = "1"
+clap    = { version = "4", features = ["derive"] }
 
 [profile.release]
 opt-level     = 3
@@ -240,14 +231,8 @@ goosedb/
 │   ├── operators/
 │   │   ├── mod.rs
 │   │   ├── scan.rs            # Parquet scanners — schema override for dictionary strings
-│   │   ├── filter.rs          # FilterMask (unused in current pipeline, retained for reference)
-│   │   ├── project.rs         # Compact-batch extraction (unused in current pipeline)
-│   │   ├── hash_table.rs      # DirectTable (production) + FxHash table (reference at SF=5)
+│   │   ├── hash_table.rs      # PartEntry + DirectTable (direct-address lookup)
 │   │   └── aggregate.rs       # i128 accumulator, final f64 conversion
-│   ├── types/
-│   │   ├── mod.rs
-│   │   ├── batches.rs         # Batch structs (retained for reference)
-│   │   └── masks.rs           # FilterMask ([u64; 32] bitmask)
 │   ├── encoding.rs            # BYTE_ARRAY brand/container → u8 index lookup tables
 │   └── timer.rs               # Lap-timer utility for operator-level profiling
 └── tests/
@@ -302,7 +287,7 @@ For each row in batch — single fused loop:
   │    p_size                                          → u8 (values 1–15 post-filter)
   │
   └─ Insert into DirectTable indexed by (p_partkey - 1):
-       entry = HashTableEntry { p_partkey, p_brand_idx, p_size, p_container_idx }
+       entry = PartEntry { p_partkey, p_brand_idx, p_size, p_container_idx }
        O(1) insert, zero hashing
 
 DirectTable built: ~60K populated slots in a 200K-slot Vec = ~3.2MB → fits in L3 cache
@@ -370,9 +355,9 @@ All structs are `#[repr(C, align(64))]` (64-byte cache-line aligned) unless note
 
 No intermediate batch struct is materialised. Arrow `RecordBatch` columns are accessed directly. The only output of Pipeline 1 is the hash table.
 
-#### `HashTableEntry`  (`#[repr(C)]`)
+#### `PartEntry`  (`#[repr(C)]`)
 ```rust
-struct HashTableEntry {
+struct PartEntry {
     p_partkey:       i64,     // 8 bytes — physical INT64 from Parquet, join key
     p_brand_idx:     u8,      // 1 byte  — 0=Brand#12, 1=Brand#23, 2=Brand#34
     p_size:          u8,      // 1 byte  — 1–15 (safe post-filter)
@@ -380,25 +365,14 @@ struct HashTableEntry {
     _padding:        [u8; 5], // 5 bytes — pad to 16 bytes total for alignment
 }
 // 60K entries × 16 bytes = ~960KB → fits in L2/L3 cache
-```
 
-#### `DirectTable`  (primary — used in production)
+#### `DirectTable`
 ```rust
 struct DirectTable {
-    slots: Vec<HashTableEntry>,  // indexed by (p_partkey - 1); brand_idx == u8::MAX = empty
+    slots: Vec<PartEntry>,  // indexed by (p_partkey - 1); brand_idx == u8::MAX = empty
 }
 // 200K slots × 16 bytes = ~3.2MB at SF=1 → fits in L3 cache
 // O(1) probe: single array access, zero hashing, zero collision handling
-```
-
-#### `HashTable`  (reference implementation — available but not used at SF=1)
-```rust
-struct HashTable {
-    entries:  Vec<HashTableEntry>, // dense array of valid entries
-    buckets:  Vec<u32>,            // open-addressing bucket indices (u32::MAX = empty)
-    capacity_mask: u32,            // power-of-2 capacity - 1 (load factor ≤ 0.5)
-}
-// FxHash on i64 p_partkey. ~960KB at SF=1. Preferred over DirectTable at SF=5 (~16MB).
 ```
 
 ---

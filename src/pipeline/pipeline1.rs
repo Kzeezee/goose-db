@@ -1,6 +1,6 @@
 use arrow::array::{Array, Int32Array, Int64Array, StringArray};
 use crate::encoding;
-use crate::operators::hash_table::{DirectTable, HashTableEntry};
+use crate::operators::hash_table::{DirectTable, PartEntry};
 use crate::operators::scan;
 use crate::timer::Timer;
 
@@ -48,7 +48,7 @@ pub fn build_part_table(data_path: &str, mut timer: Option<&mut Timer>) -> Resul
             if cont_idx == u8::MAX {
                 continue;
             }
-            table.insert(HashTableEntry {
+            table.insert(PartEntry {
                 p_partkey: partkey.value(i),
                 p_brand_idx: brand_idx,
                 p_size: s as u8,
