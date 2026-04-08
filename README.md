@@ -46,8 +46,14 @@ Operator breakdown (run 6):
 
 Requires the DuckDB CLI installed and on PATH.
 
+**Original query (flat WHERE clause):**
 ```bash
 python scripts/duckdb_baseline.py --data data/sf1 --runs 6 --timing
+```
+
+**Optimised query (predicate pushdown via CTEs — filters each table before the join):**
+```bash
+python scripts/duckdb_baseline_optimised.py --data data/sf1 --runs 6 --timing
 ```
 
 Example output:
@@ -62,7 +68,7 @@ Mean (runs 2-6): 280.80 ms
 3083843.0578
 ```
 
-The script runs single-threaded (`PRAGMA threads=1`), discards the first run as warmup, and reports the mean of runs 2–N — directly comparable to goosedb's `--bench` output.
+Both scripts run single-threaded (`PRAGMA threads=1`), discard the first run as warmup, and report the mean of runs 2–N — directly comparable to goosedb's `--bench` output.
 
 ---
 
@@ -186,8 +192,11 @@ goosedb/
 ├── tests/
 │   └── correctness_sf1.rs  # Integration test (SF=1 result == 3083843.0578)
 ├── scripts/
-│   ├── generate_data.sql    # DuckDB TPC-H data export
-│   └── duckdb_baseline.sql  # DuckDB Q19 timing (threads=1)
+│   ├── generate_data.sql              # DuckDB TPC-H data export
+│   ├── duckdb_baseline.sql            # DuckDB Q19 timing (threads=1)
+│   ├── duckdb_baseline_optimised.sql  # DuckDB Q19 with predicate pushdown (threads=1)
+│   ├── duckdb_baseline.py             # Python runner for duckdb_baseline.sql
+│   └── duckdb_baseline_optimised.py   # Python runner for duckdb_baseline_optimised.sql
 ├── run.sh                   # One-command runner
 ├── check_correctness.sh     # Exact output comparison
 └── OPTIMISATIONS.md         # Optimisation tracker (what was tried, what worked)
