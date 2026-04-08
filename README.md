@@ -8,6 +8,11 @@ goosedb exploits domain-specific knowledge about Q19's data access patterns to o
 
 ## Run goosedb
 
+**Linux / macOS:**
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo run --release -- --data data/sf1 --out result.csv --bench --runs 6 --timing
+```
+
 **Bash / WSL:**
 ```bash
 ./run.sh --data data/sf1 --out result.csv --bench --runs 6 --timing
@@ -91,6 +96,7 @@ source $HOME/.cargo/env
 
 TPC-H Parquet files are not included in the repository. Generate them with DuckDB:
 
+**Linux / macOS / Bash / WSL:**
 ```bash
 duckdb < scripts/generate_data.sql
 ```

@@ -1,11 +1,142 @@
-   0.312452700s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: stale: missing "C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-5124cccaf0dd5dce\\dep-bin-goosedb"
-   0.313657800s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint dirty for goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db)/Check { test: false }/TargetInner { name: "goosedb", doc: true, ..: with_path("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\src\\main.rs", Edition2021) }
-   0.313727900s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(MissingFile("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-5124cccaf0dd5dce\\dep-bin-goosedb")))
-   0.315217700s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: stale: missing "C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-b986e34504bd2a33\\dep-test-bin-goosedb"
-   0.315683100s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint dirty for goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db)/Check { test: true }/TargetInner { name: "goosedb", doc: true, ..: with_path("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\src\\main.rs", Edition2021) }
-   0.315725300s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(MissingFile("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-b986e34504bd2a33\\dep-test-bin-goosedb")))
-   0.317106100s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="correctness_sf1"}: cargo::core::compiler::fingerprint: stale: missing "C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-3026b45594a0603d\\dep-test-integration-test-correctness_sf1"
-   0.317765400s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="correctness_sf1"}: cargo::core::compiler::fingerprint: fingerprint dirty for goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db)/Check { test: true }/TargetInner { kind: "test", name: "correctness_sf1", benched: false, ..: with_path("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\tests\\correctness_sf1.rs", Edition2021) }
-   0.317817000s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db) target="correctness_sf1"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(MissingFile("C:\\Users\\tayca\\OneDrive\\Documents\\Y2S2\\addb\\goose-db\\target\\debug\\.fingerprint\\goosedb-3026b45594a0603d\\dep-test-integration-test-correctness_sf1")))
-    Checking goosedb v0.1.0 (C:\Users\tayca\OneDrive\Documents\Y2S2\addb\goose-db)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.76s
+   0.079553000s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint error for goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)/Check { test: false }/TargetInner { name_inferred: true, ..: lib_target("goosedb", ["lib"], "C:\\Users\\Don\\Desktop\\SMU\\Y2S2\\Advance Database\\goose-db\\src\\lib.rs", Edition2021) }
+   0.080232100s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db\target\debug\.fingerprint\goosedb-78082fbc437876f2\lib-goosedb`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_odb_object_data
+   1: git_filter_source_path
+   2: git_filter_source_path
+   3: git_filter_source_path
+   4: git_filter_source_path
+   5: git_odb_object_id
+   6: git_odb_object_id
+   7: git_odb_object_id
+   8: git_odb_object_id
+   9: git_odb_object_id
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_odb_object_id
+  13: git_odb_object_id
+  14: git_odb_object_id
+  15: git_odb_object_data
+  16: git_odb_object_id
+  17: git_midx_writer_new
+  18: git_midx_writer_new
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.108745100s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint error for goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)/Check { test: true }/TargetInner { name_inferred: true, ..: lib_target("goosedb", ["lib"], "C:\\Users\\Don\\Desktop\\SMU\\Y2S2\\Advance Database\\goose-db\\src\\lib.rs", Edition2021) }
+   0.108769100s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db\target\debug\.fingerprint\goosedb-5e94604b5dfd31f0\test-lib-goosedb`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_odb_object_data
+   1: git_filter_source_path
+   2: git_filter_source_path
+   3: git_filter_source_path
+   4: git_filter_source_path
+   5: git_odb_object_id
+   6: git_odb_object_id
+   7: git_odb_object_id
+   8: git_odb_object_id
+   9: git_odb_object_id
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_odb_object_id
+  13: git_odb_object_id
+  14: git_odb_object_id
+  15: git_odb_object_data
+  16: git_odb_object_id
+  17: git_midx_writer_new
+  18: git_midx_writer_new
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.109280600s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint error for goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)/Check { test: false }/TargetInner { name: "goosedb", doc: true, ..: with_path("C:\\Users\\Don\\Desktop\\SMU\\Y2S2\\Advance Database\\goose-db\\src\\main.rs", Edition2021) }
+   0.109288900s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db\target\debug\.fingerprint\goosedb-3ba4c248a2f29ad1\bin-goosedb`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_odb_object_data
+   1: git_filter_source_path
+   2: git_filter_source_path
+   3: git_filter_source_path
+   4: git_filter_source_path
+   5: git_odb_object_id
+   6: git_odb_object_id
+   7: git_odb_object_id
+   8: git_odb_object_id
+   9: git_odb_object_id
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_odb_object_id
+  13: git_odb_object_id
+  14: git_odb_object_id
+  15: git_odb_object_data
+  16: git_odb_object_id
+  17: git_midx_writer_new
+  18: git_midx_writer_new
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.109700700s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint: fingerprint error for goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)/Check { test: true }/TargetInner { name: "goosedb", doc: true, ..: with_path("C:\\Users\\Don\\Desktop\\SMU\\Y2S2\\Advance Database\\goose-db\\src\\main.rs", Edition2021) }
+   0.109708400s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="goosedb"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db\target\debug\.fingerprint\goosedb-429a2d4357d83aea\test-bin-goosedb`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_odb_object_data
+   1: git_filter_source_path
+   2: git_filter_source_path
+   3: git_filter_source_path
+   4: git_filter_source_path
+   5: git_odb_object_id
+   6: git_odb_object_id
+   7: git_odb_object_id
+   8: git_odb_object_id
+   9: git_odb_object_id
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_odb_object_id
+  13: git_odb_object_id
+  14: git_odb_object_id
+  15: git_odb_object_data
+  16: git_odb_object_id
+  17: git_midx_writer_new
+  18: git_midx_writer_new
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.110113700s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="correctness_sf1"}: cargo::core::compiler::fingerprint: fingerprint error for goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)/Check { test: true }/TargetInner { kind: "test", name: "correctness_sf1", benched: false, ..: with_path("C:\\Users\\Don\\Desktop\\SMU\\Y2S2\\Advance Database\\goose-db\\tests\\correctness_sf1.rs", Edition2021) }
+   0.110121600s  INFO prepare_target{force=false package_id=goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db) target="correctness_sf1"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db\target\debug\.fingerprint\goosedb-607779a2c6cc770a\test-integration-test-correctness_sf1`
+
+Caused by:
+    The system cannot find the file specified. (os error 2)
+
+Stack backtrace:
+   0: git_odb_object_data
+   1: git_filter_source_path
+   2: git_filter_source_path
+   3: git_filter_source_path
+   4: git_filter_source_path
+   5: git_odb_object_id
+   6: git_odb_object_id
+   7: git_odb_object_id
+   8: git_odb_object_id
+   9: git_odb_object_id
+  10: git_filter_source_repo
+  11: git_filter_source_repo
+  12: git_odb_object_id
+  13: git_odb_object_id
+  14: git_odb_object_id
+  15: git_odb_object_data
+  16: git_odb_object_id
+  17: git_midx_writer_new
+  18: git_midx_writer_new
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+    Checking goosedb v0.1.0 (C:\Users\Don\Desktop\SMU\Y2S2\Advance Database\goose-db)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1.64s
