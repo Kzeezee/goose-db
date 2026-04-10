@@ -37,12 +37,14 @@ Mean (runs 2–6): 214.80 ms
 3083843.0578                    ← printed to stdout (plain number, no label)
 
 Operator breakdown (run 6):
-  part metadata + alloc              :   1.00 ms
-  part scan + table build            :   9.28 ms
-  lineitem file open                 :   0.07 ms
-  lineitem metadata + schema override:   0.37 ms
-  lineitem reader build              :   0.38 ms
-  lineitem scan + probe + aggregate  : 226.01 ms
+  part metadata + alloc                   :    12.01 ms
+  part scan + table build                 :    73.36 ms
+  lineitem file open                      :     0.13 ms
+  lineitem metadata + schema override     :     1.03 ms
+  lineitem reader build                   :     0.96 ms
+  lineitem parquet read                   :     0.78 ms
+  lineitem probe (pre-filter + hash lookup):    94.09 ms
+  lineitem aggregate (revenue accumulation):     0.29 ms
 ```
 
 ---
